@@ -100,6 +100,8 @@ private:
     std::queue<Ptr<Packet>> m_sendBuffer;
 
     uint32_t m_frameSeqCounter;
+
+    uint32_t m_cumulativePacketsSent; // <<< 新增：累计发送的总包数
     
     double m_throughput;
     Time m_delay;

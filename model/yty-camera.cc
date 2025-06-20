@@ -53,6 +53,7 @@ YtyCamera::YtyCamera()
       m_packetSize(1400),
       m_running(false),
       m_frameSeqCounter(0),
+      m_cumulativePacketsSent(0), // <<< 新增：初始化计数器
       m_throughput(0.0),
       m_delay(Seconds(0.0)),
       m_lossRate(0.0),
@@ -146,28 +147,32 @@ void YtyCamera::Encoder(void)
     if (!m_running) return;
 
     uint32_t frameSize = m_bitrate / m_frameRate;
-    uint32_t numPackets = (frameSize / 8 + m_packetSize - 1) / m_packetSize;
+    uint32_t numPacketsInFrame = (frameSize / 8 + m_packetSize - 1) / m_packetSize;
 
-    for (uint32_t i = 0; i < numPackets; ++i)
+    for (uint32_t i = 0; i < numPacketsInFrame; ++i)
     {
         Ptr<Packet> packet = Create<Packet>(m_packetSize);
         
+        m_cumulativePacketsSent++; // <<< 新增：每次打包前，先递增总包数计数器
+
         RtpHeader rtpHeader;
         rtpHeader.SetTimestamp(Simulator::Now().GetNanoSeconds());
         rtpHeader.SetFrameSeq(m_frameSeqCounter);
         rtpHeader.SetPacketSeq(i);
-        rtpHeader.SetTotalPackets(numPackets);
+        // ▼▼▼ 修改：将累计的总包数放入头部 ▼▼▼
+        rtpHeader.SetTotalPackets(m_cumulativePacketsSent);
         
         packet->AddHeader(rtpHeader);
         m_sendBuffer.push(packet);
     }
-    NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera encoded frame " << m_frameSeqCounter << " with " << numPackets << " packets.");
+    NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera encoded frame " << m_frameSeqCounter << " with " << numPacketsInFrame << " packets.");
 
     m_frameSeqCounter++;
 
     Time nextEncodeTime = Seconds(1.0 / m_frameRate);
     m_encoderEvent = Simulator::Schedule(nextEncodeTime, &YtyCamera::Encoder, this);
 }
+
 
 void YtyCamera::ScheduleTx(void)
 {

@@ -39,48 +39,29 @@ private:
     virtual void StopApplication(void);
 
     // 客户端信息结构体
-        struct ClientSession {
-        // 接收缓冲区
-        std::map<uint32_t, std::vector<Ptr<Packet>>> recvBuffer; 
-        
-        // --- 统计变量 ---
-        // 当前周期的累计值
-        uint64_t currentTotalReceivedPackets; // 当前周期累计收到的总包数
-        uint64_t currentTotalReceivedBytes;   // 当前周期累计收到的总字节数
-        Time     currentTotalDelay;           // 当前周期累计的总时延
+    struct ClientSession {
+        // --- 用于当前报告周期的统计变量 ---
+        uint64_t intervalReceivedPackets; // 本周期内收到的总包数
+        uint64_t intervalReceivedBytes;   // 本周期内收到的总字节数
+        Time     intervalTotalDelay;      // 本周期内累计的总时延
 
-        // 上一个周期的累计值 (用于计算差值)
-        uint64_t lastTotalReceivedPackets;    // 上一周期记录的总包数
-        uint64_t lastTotalReceivedBytes;      // 上一周期记录的总字节数
-        Time     lastTotalDelay;              // 上一周期记录的总时延
-        Time     lastReportTime;              // 上一次发送报告的时间
+        // --- 用于丢包率计算的状态变量 ---
+        uint32_t lastReportedSentPackets; // 上次报告时，摄像头已发送的总包数
+        uint32_t maxSeenSentPackets;      // 本周期内，看到的最大已发送包序号
 
-        // 从RTP头中读取的、摄像头已发送的总包数
-        uint32_t lastReportedSentPackets;     // 上一次从RTP头读取到的发送总数
-        uint32_t maxSeenSentPackets;          // 当前周期看到的最大已发送包数
-        
-        EventId reportEvent;         // 统计报告事件ID
-        EventId playEvent;           // 播放事件ID
-
-        // 播放器相关
-        uint32_t playFrameSeq;       // 当前期望播放的帧序号
-        uint32_t playFrameRate;      // 播放帧率
+        // --- 计时和事件调度 ---
+        Time     lastReportTime;          // 上次发送报告的时间
+        EventId  reportEvent;             // 统计报告事件ID
 
         // 构造函数，初始化所有变量
-        ClientSession() : 
-            currentTotalReceivedPackets(0),
-            currentTotalReceivedBytes(0),
-            currentTotalDelay(Seconds(0)),
-            lastTotalReceivedPackets(0),
-            lastTotalReceivedBytes(0),
-            lastTotalDelay(Seconds(0)),
-            lastReportTime(Seconds(0)),
+        ClientSession() :
+            intervalReceivedPackets(0),
+            intervalReceivedBytes(0),
+            intervalTotalDelay(Seconds(0)),
             lastReportedSentPackets(0),
             maxSeenSentPackets(0),
-            playFrameSeq(0),
-            playFrameRate(30)
+            lastReportTime(Seconds(0))
         {
-            // 构造函数体为空
         }
     };
 
