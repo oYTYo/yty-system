@@ -42,7 +42,7 @@ TypeId YtyCamera::GetTypeId(void)
         .AddAttribute("RemoteAddress", "The destination address of the outbound packets", AddressValue(), MakeAddressAccessor(&YtyCamera::m_peerAddress), MakeAddressChecker())
         .AddAttribute("RemotePort", "The destination port of the outbound packets", UintegerValue(9), MakeUintegerAccessor(&YtyCamera::m_peerPort), MakeUintegerChecker<uint16_t>())
         // ▼▼▼ 修改部分 1：添加LogFile属性 ▼▼▼
-        .AddAttribute("LogFile", "File to log statistics.", StringValue("camera_stats.txt"), MakeStringAccessor(&YtyCamera::m_logFileName), MakeStringChecker());
+        .AddAttribute("LogFile", "File to log statistics.", StringValue("scratch/camera_stats.txt"), MakeStringAccessor(&YtyCamera::m_logFileName), MakeStringChecker());
     return tid;
 }
 
@@ -219,12 +219,16 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
     Address from;
     while ((packet = socket->RecvFrom(from)))
     {
-        if (packet->GetSize() > 0)
+        uint32_t expectedSize = sizeof(double) + sizeof(int64_t) + sizeof(double);
+        if (packet->GetSize() >= expectedSize)
         {
-            uint8_t* buffer = new uint8_t[packet->GetSize()];
-            packet->CopyData(buffer, packet->GetSize());
+            // 【已修正】: 使用 new/delete[] 来代替可变长度数组(VLA)
+            uint8_t* buffer = new uint8_t[expectedSize];
+            packet->CopyData(buffer, expectedSize);
             
             uint32_t offset = 0;
+
+            // 从缓冲区解析数据
             m_throughput = *(reinterpret_cast<double*>(buffer + offset));
             offset += sizeof(double);
 
@@ -233,15 +237,15 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
             offset += sizeof(int64_t);
 
             m_lossRate = *(reinterpret_cast<double*>(buffer + offset));
-
-            delete[] buffer;
             
+            // 【重要】: 释放动态分配的内存
+            delete[] buffer;
+
             NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() 
                         << "s, Camera received RTCP feedback: Throughput=" << m_throughput 
                         << " bps, Delay=" << m_delay.GetMilliSeconds() 
                         << " ms, Loss Rate=" << m_lossRate);
 
-            // ▼▼▼ 修改部分 5：调用写文件函数 ▼▼▼
             WriteStatsToFile();
             PathDecision();
         }
@@ -250,7 +254,20 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
 
 void YtyCamera::PathDecision(void)
 {
-    // This function is still a placeholder for future logic
+    // 此处是实现路径选择的地方，现在写实现拥塞控制和码率自适应逻辑的地方
+    // 例如：如果丢包率高于5%，并且当前码率高于最低码率，则降低码率
+    // if (m_lossRate > 0.05 && m_bitrate > 500000)
+    // {
+    //     m_bitrate -= 100000; // 降低100kbps
+    //     m_sendRate = DataRate(m_bitrate);
+    //     NS_LOG_INFO(Simulator::Now().GetSeconds() << "s: Congestion detected. Reducing bitrate to " << m_bitrate);
+    // }
+    // else if (m_lossRate < 0.01 && m_bitrate < 2000000) // 如果网络状况良好，可以尝试增加码率
+    // {
+    //     m_bitrate += 100000;
+    //     m_sendRate = DataRate(m_bitrate);
+    //     NS_LOG_INFO(Simulator::Now().GetSeconds() << "s: Network is good. Increasing bitrate to " << m_bitrate);
+    // }
 }
 
 // ▼▼▼ 修改部分 6：添加写文件函数的完整实现 ▼▼▼

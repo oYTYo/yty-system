@@ -94,21 +94,77 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
     Address from;
     while ((packet = socket->RecvFrom(from)))
     {
-        RtpHeader rtpHeader;
-        // Try to peek the header to see if it's RTP
-        if (packet->PeekHeader(rtpHeader)) {
-            ProcessRtp(packet, from);
-        } else {
-            ProcessRtsp(packet, from);
+        // 复制少量起始数据用于安全地检查包类型
+        uint8_t buffer[16];
+        packet->CopyData(buffer, std::min((uint32_t)16, packet->GetSize()));
+        std::string start(reinterpret_cast<char*>(buffer), std::min((uint32_t)16, packet->GetSize()));
+
+        // 通过检查关键字来判断是否为RTSP请求包
+        if (start.rfind("PLAY", 0) == 0 || start.rfind("TEARDOWN", 0) == 0)
+        {
+             ProcessRtsp(packet, from);
+        }
+        else // 否则，我们假设它是一个RTP包
+        {
+             ProcessRtp(packet, from);
         }
     }
+}
+
+
+void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
+{
+    if (m_sessions.find(from) == m_sessions.end())
+    {
+        NS_LOG_WARN("Received RTP from unknown client " << InetSocketAddress::ConvertFrom(from).GetIpv4());
+        return;
+    }
+    
+    ClientSession& session = m_sessions[from];
+
+    // --- ▼▼▼ 【已修改】更新统计逻辑 ▼▼▼ ---
+    uint32_t packetSize = packet->GetSize(); // 获取实际包大小
+
+    RtpHeader rtpHeader;
+    packet->RemoveHeader(rtpHeader);
+
+    Time sentTime = NanoSeconds(rtpHeader.GetTimestamp());
+    Time now = Simulator::Now();
+    Time delay = now - sentTime;
+    
+    // 累加当前周期的统计值
+    session.currentTotalReceivedPackets++;
+    session.currentTotalReceivedBytes += packetSize;
+    session.currentTotalDelay += delay;
+    
+    // 更新我们所看到的、对方已发送的最大包数
+    // 注意：这里假设GetTotalPackets()是累计值，如果不是，需要修改摄像头端
+    // 为了简单起见，我们直接使用帧序号和包序号来估算
+    uint32_t estimatedSentCount = rtpHeader.GetFrameSeq() * 10 + rtpHeader.GetPacketSeq(); // 这是一个简化的估算
+    if (estimatedSentCount > session.maxSeenSentPackets) {
+        session.maxSeenSentPackets = estimatedSentCount;
+    }
+    // --- ▲▲▲ 修改结束 ▲▲▲ ---
+
+    session.recvBuffer[rtpHeader.GetFrameSeq()].push_back(packet);
+
+    NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server received packet " << rtpHeader.GetPacketSeq() 
+                << " for frame " << rtpHeader.GetFrameSeq() << " from " << InetSocketAddress::ConvertFrom(from).GetIpv4()
+                << ". Delay: " << delay.GetMilliSeconds() << " ms.");
 }
 
 void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
 {
     uint8_t buffer[100];
     packet->CopyData(buffer, packet->GetSize());
-    buffer[packet->GetSize()] = '\0';
+    // 确保字符串以空字符结尾
+    if (packet->GetSize() < 100)
+    {
+        buffer[packet->GetSize()] = '\0';
+    } else {
+        buffer[99] = '\0';
+    }
+    
     std::string request(reinterpret_cast<char*>(buffer));
 
     if (request.find("PLAY") != std::string::npos)
@@ -125,44 +181,20 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
     {
         NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server received TEARDOWN request from " << InetSocketAddress::ConvertFrom(from).GetIpv4());
         if (m_sessions.count(from)) {
-            Simulator::Cancel(m_sessions[from].reportEvent);
-            Simulator::Cancel(m_sessions[from].playEvent);
+            // 使用 IsPending() 检查事件是否正在等待执行
+            if (m_sessions[from].reportEvent.IsPending())
+            {
+                Simulator::Cancel(m_sessions[from].reportEvent);
+            }
+            if (m_sessions[from].playEvent.IsPending())
+            {
+                Simulator::Cancel(m_sessions[from].playEvent);
+            }
             m_sessions.erase(from);
         }
     }
 }
 
-void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
-{
-    if (m_sessions.find(from) == m_sessions.end())
-    {
-        NS_LOG_WARN("Received RTP from unknown client " << InetSocketAddress::ConvertFrom(from).GetIpv4());
-        return;
-    }
-    
-    ClientSession& session = m_sessions[from];
-
-    // FIX: Remove the header properly from the packet
-    RtpHeader rtpHeader;
-    packet->RemoveHeader(rtpHeader);
-
-    Time sentTime = NanoSeconds(rtpHeader.GetTimestamp());
-    Time now = Simulator::Now();
-    Time delay = now - sentTime;
-    
-    session.packetsReceived++;
-    session.totalDelay += delay;
-    // This is still a simplification, a more robust solution would track sent packets per frame
-    if(rtpHeader.GetPacketSeq() == rtpHeader.GetTotalPackets() - 1) {
-        session.totalPacketsSent += rtpHeader.GetTotalPackets();
-    }
-
-    session.recvBuffer[rtpHeader.GetFrameSeq()].push_back(packet);
-
-    NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server received packet " << rtpHeader.GetPacketSeq() 
-                << " for frame " << rtpHeader.GetFrameSeq() << " from " << InetSocketAddress::ConvertFrom(from).GetIpv4()
-                << ". Delay: " << delay.GetMilliSeconds() << " ms.");
-}
 
 void YtyServer::ScheduleReport(const Address& clientAddress)
 {
@@ -176,36 +208,72 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     if (!m_sessions.count(clientAddress)) return;
 
     ClientSession& session = m_sessions[clientAddress];
+    Time now = Simulator::Now();
+
+    // --- ▼▼▼ 【核心修改】基于时间窗口的差值计算 ▼▼▼ ---
+
+    // 1. 计算自上次报告以来的时间差
+    Time interval = now - session.lastReportTime;
+    if (interval.IsZero())
+    {
+        // 避免除以零，如果间隔为0则跳过此次报告
+        ScheduleReport(clientAddress);
+        return;
+    }
+
+    // 2. 计算此时间窗口内接收到的包数和字节数
+    uint64_t intervalPackets = session.currentTotalReceivedPackets - session.lastTotalReceivedPackets;
+    uint64_t intervalBytes = session.currentTotalReceivedBytes - session.lastTotalReceivedBytes;
+
+    // 3. 计算此时间窗口内的平均吞吐量
+    double throughput = (intervalBytes * 8) / interval.GetSeconds();
+
+    // 4. 计算此时间窗口内的平均时延
+    Time intervalDelay = session.currentTotalDelay - session.lastTotalDelay;
+    Time avgDelay = (intervalPackets > 0) ? intervalDelay / intervalPackets : Seconds(0);
+
+    // 5. 计算此时间窗口内的丢包率
+    // (这是一个简化的估算，更精确的方法需要在RTP头中加入累计已发送包总数)
+    uint32_t intervalSent = session.maxSeenSentPackets - session.lastReportedSentPackets;
+    double lossRate = 0.0;
+    if (intervalSent > 0)
+    {
+        // 确保接收数不超过发送数
+        uint64_t received = std::min((uint64_t)intervalSent, intervalPackets);
+        lossRate = 1.0 - (double)received / intervalSent;
+    }
+    // 防止因估算不准出现负数
+    if (lossRate < 0) lossRate = 0.0;
+
+    // --- ▲▲▲ 计算结束 ▲▲▲ ---
+
+    // 使用计算出的瞬时值来创建RTCP包
+    uint32_t payloadSize = sizeof(double) + sizeof(int64_t) + sizeof(double);
+    uint8_t* buffer = new uint8_t[payloadSize];
+    uint32_t offset = 0;
+
+    memcpy(buffer + offset, &throughput, sizeof(double));
+    offset += sizeof(double);
+    int64_t delay_ns = avgDelay.GetNanoSeconds();
+    memcpy(buffer + offset, &delay_ns, sizeof(int64_t));
+    offset += sizeof(int64_t);
+    memcpy(buffer + offset, &lossRate, sizeof(double));
     
-    uint32_t received_since_last = session.packetsReceived;
-    uint32_t sent_since_last = session.totalPacketsSent;
-
-    double throughput = (received_since_last * 1400 * 8) / m_reportInterval.GetSeconds();
-    Time avgDelay = (received_since_last > 0) ? session.totalDelay / received_since_last : Seconds(0);
-    double lossRate = (sent_since_last > 0) ? 1.0 - (double)received_since_last / sent_since_last : 0.0;
-
-    // ▼▼▼ FIX: Create RTCP payload correctly ▼▼▼
-    struct RtcpPayload {
-        double throughput;
-        int64_t delay_ns;
-        double lossRate;
-    };
-    RtcpPayload payload;
-    payload.throughput = throughput;
-    payload.delay_ns = avgDelay.GetNanoSeconds();
-    payload.lossRate = lossRate;
-
-    Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<uint8_t*>(&payload), sizeof(payload));
-    // ▲▲▲ End of RTCP payload fix ▲▲▲
+    Ptr<Packet> rtcpPacket = Create<Packet>(buffer, payloadSize);
+    delete[] buffer;
 
     m_socket->SendTo(rtcpPacket, 0, clientAddress);
 
-    NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server sent RTCP to " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4()
-                << ": Throughput=" << throughput << " bps, AvgDelay=" << avgDelay.GetMilliSeconds() << " ms, LossRate=" << lossRate);
+    NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4()
+                << ": IntervalThroughput=" << throughput << " bps, IntervalAvgDelay=" << avgDelay.GetMilliSeconds() << " ms, IntervalLossRate=" << lossRate);
 
-    session.packetsReceived = 0;
-    session.totalPacketsSent = 0;
-    session.totalDelay = Seconds(0);
+    // --- ▼▼▼ 【重要】更新上一周期的状态，为下一次计算做准备 ▼▼▼ ---
+    session.lastTotalReceivedPackets = session.currentTotalReceivedPackets;
+    session.lastTotalReceivedBytes = session.currentTotalReceivedBytes;
+    session.lastTotalDelay = session.currentTotalDelay;
+    session.lastReportedSentPackets = session.maxSeenSentPackets;
+    session.lastReportTime = now;
+    // --- ▲▲▲ 更新结束 ▲▲▲ ---
 
     ScheduleReport(clientAddress);
 }
