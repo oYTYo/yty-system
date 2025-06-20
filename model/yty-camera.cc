@@ -106,13 +106,21 @@ void YtyCamera::StartApplication(void)
     }
     m_socket->SetRecvCallback(MakeCallback(&YtyCamera::HandleRead, this));
 
-    m_sendRate = DataRate(m_bitrate);
+    
+    // 1. 根据打包逻辑，计算实际的生产码率
+    uint32_t frameSizeInBits = m_bitrate / m_frameRate;
+    uint32_t numPacketsInFrame = (frameSizeInBits / 8 + m_packetSize - 1) / m_packetSize;
+    uint32_t actualBitrate = numPacketsInFrame * m_packetSize * 8 * m_frameRate;
 
+    // 2. 使用实际码率来设置发送速率
+    m_sendRate = DataRate(actualBitrate);
+    
     SendRtspRequest("PLAY");
 
     m_encoderEvent = Simulator::ScheduleNow(&YtyCamera::Encoder, this);
     m_sendEvent = Simulator::ScheduleNow(&YtyCamera::SendPacket, this);
 }
+
 
 void YtyCamera::StopApplication(void)
 {

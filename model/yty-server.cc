@@ -200,6 +200,16 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4()
                 << ": IntervalThroughput=" << throughput << " bps, IntervalAvgDelay=" << avgDelay.GetMilliSeconds() << " ms, IntervalLossRate=" << lossRate);
 
+
+    // ▼▼▼ 添加调试日志 ▼▼▼
+    NS_LOG_INFO("--- DEBUG --- "
+                << "Time: " << now.GetSeconds() << "s, "
+                << "Client: " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << ", "
+                << "TotalDelay before reset: " << session.intervalTotalDelay.GetMilliSeconds() << "ms, "
+                << "Packets in interval: " << session.intervalReceivedPackets);
+    // ▲▲▲ 添加调试日志 ▲▲▲
+
+    
     // 【至关重要】重置周期统计变量，并更新状态
     session.intervalReceivedPackets = 0;
     session.intervalReceivedBytes = 0;
