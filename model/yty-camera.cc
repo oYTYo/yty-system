@@ -21,13 +21,36 @@ NS_OBJECT_ENSURE_REGISTERED(YtyCamera);
 // RtpHeader 类的实现代码
 NS_OBJECT_ENSURE_REGISTERED(RtpHeader);
 TypeId RtpHeader::GetTypeId(void) { static TypeId tid = TypeId("ns3::RtpHeader").SetParent<Header>().SetGroupName("Applications").AddConstructor<RtpHeader>(); return tid; }
+
 RtpHeader::RtpHeader() : m_timestamp(0), m_frameSeq(0), m_packetSeq(0), m_totalPackets(0) {}
+
 RtpHeader::~RtpHeader() {}
+
 TypeId RtpHeader::GetInstanceTypeId(void) const { return GetTypeId(); }
-void RtpHeader::Print(std::ostream &os) const { os << "Timestamp=" << m_timestamp << " FrameSeq=" << m_frameSeq << " PacketSeq=" << m_packetSeq << " TotalPackets=" << m_totalPackets; }
-uint32_t RtpHeader::GetSerializedSize(void) const { return sizeof(m_timestamp) + sizeof(m_frameSeq) + sizeof(m_packetSeq) + sizeof(m_totalPackets); }
-void RtpHeader::Serialize(Buffer::Iterator start) const { start.WriteHtonU64(m_timestamp); start.WriteHtonU32(m_frameSeq); start.WriteHtonU32(m_packetSeq); start.WriteHtonU32(m_totalPackets); }
-uint32_t RtpHeader::Deserialize(Buffer::Iterator start) { m_timestamp = start.ReadNtohU64(); m_frameSeq = start.ReadNtohU32(); m_packetSeq = start.ReadNtohU32(); m_totalPackets = start.ReadNtohU32(); return GetSerializedSize(); }
+
+void RtpHeader::Print(std::ostream &os) const {
+    os << "Timestamp=" << m_timestamp << " FrameSeq=" << m_frameSeq << " PacketSeq=" << m_packetSeq << " TotalPackets=" << m_totalPackets << " PacketsInFrame=" << m_packetsInFrame;
+}
+
+uint32_t RtpHeader::GetSerializedSize(void) const {
+    return sizeof(m_timestamp) + sizeof(m_frameSeq) + sizeof(m_packetSeq) + sizeof(m_totalPackets) + sizeof(m_packetsInFrame);
+}
+
+void RtpHeader::Serialize(Buffer::Iterator start) const { 
+    start.WriteHtonU64(m_timestamp); 
+    start.WriteHtonU32(m_frameSeq); 
+    start.WriteHtonU32(m_packetSeq); 
+    start.WriteHtonU32(m_totalPackets); 
+    start.WriteHtonU32(m_packetsInFrame);
+    }
+
+uint32_t RtpHeader::Deserialize(Buffer::Iterator start) { 
+    m_timestamp = start.ReadNtohU64(); 
+    m_frameSeq = start.ReadNtohU32(); 
+    m_packetSeq = start.ReadNtohU32(); 
+    m_totalPackets = start.ReadNtohU32(); 
+    m_packetsInFrame = start.ReadNtohU32(); 
+    return GetSerializedSize(); }
 
 
 TypeId YtyCamera::GetTypeId(void)
@@ -167,8 +190,9 @@ void YtyCamera::Encoder(void)
         rtpHeader.SetTimestamp(Simulator::Now().GetNanoSeconds());
         rtpHeader.SetFrameSeq(m_frameSeqCounter);
         rtpHeader.SetPacketSeq(i);
-        // ▼▼▼ 修改：将累计的总包数放入头部 ▼▼▼
         rtpHeader.SetTotalPackets(m_cumulativePacketsSent);
+
+        rtpHeader.SetPacketsInFrame(numPacketsInFrame); 
         
         packet->AddHeader(rtpHeader);
         m_sendBuffer.push(packet);
@@ -216,8 +240,19 @@ void YtyCamera::SendRtpPacket(Ptr<Packet> packet)
 void YtyCamera::SendRtspRequest(std::string method)
 {
     std::ostringstream msg;
-    msg << method << " rtsp://server/video RTSP/1.0\r\n"
-        << "CSeq: 1\r\n\r\n";
+
+    // 只在PLAY请求中添加自定义的帧率头字段,协商一下播放帧率
+    if (method == "PLAY")
+    {
+        msg << "PLAY rtsp://server/video RTSP/1.0\r\n"
+            << "CSeq: 1\r\n"
+            << "X-Frame-Rate: " << m_frameRate << "\r\n\r\n"; // 添加此行来携带帧率信息
+    }
+    else // 对于其他请求 (如 TEARDOWN)，保持原样
+    {
+        msg << method << " rtsp://server/video RTSP/1.0\r\n"
+            << "CSeq: 1\r\n\r\n";
+    }
     
     Ptr<Packet> packet = Create<Packet>((const uint8_t*)msg.str().c_str(), msg.str().length());
     m_socket->Send(packet);

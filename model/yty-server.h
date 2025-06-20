@@ -12,6 +12,7 @@
 
 #include <map>
 #include <vector>
+#include <fstream> // 为 std::ofstream 添加此头文件
 
 namespace ns3 {
 
@@ -38,6 +39,16 @@ private:
     virtual void StartApplication(void);
     virtual void StopApplication(void);
 
+    // 用于保存接收到的数据包及其到达时间的结构体
+    struct ReceivedPacket {
+        Ptr<Packet> packet;
+        Time receivedTime;
+    };
+
+    // 抖动缓冲：将帧序号映射到一个 "包序号 -> 收到的包" 的map
+    using JitterBuffer = std::map<uint32_t, std::map<uint32_t, ReceivedPacket>>;
+
+
     // 客户端信息结构体
     struct ClientSession {
         // --- 用于当前报告周期的统计变量 ---
@@ -53,14 +64,32 @@ private:
         Time     lastReportTime;          // 上次发送报告的时间
         EventId  reportEvent;             // 统计报告事件ID
 
-        // 构造函数，初始化所有变量
+        // --- 播放和抖动缓冲 ---
+        JitterBuffer buffer;
+        uint32_t nextFrameToPlay;       // 我们期望播放的下一帧的序号
+        EventId  playbackEvent;         // 触发下一次播放尝试的事件
+        EventId  stutterTimeoutEvent;   // 处理帧未按时到达的事件
+        uint32_t frameRate;             // 用于存储协商后的帧率
+
+        // --- 播放日志统计 ---
+        uint32_t playedFrames;          // 当前1秒周期内播放的总帧数
+        uint32_t stutterEvents;         // 当前1秒周期内的总卡顿次数
+        EventId  logStatsEvent;         // 触发日志记录的事件
+
+        // 构造函数
         ClientSession() :
             intervalReceivedPackets(0),
             intervalReceivedBytes(0),
             intervalTotalDelay(Seconds(0)),
             lastReportedSentPackets(0),
             maxSeenSentPackets(0),
-            lastReportTime(Seconds(0))
+            lastReportTime(Seconds(0)),
+            nextFrameToPlay(0),
+            frameRate(30), // 给一个默认值, 以防协商失败
+            playedFrames(0),
+            stutterEvents(0)
+            
+
         {
         }
     };
@@ -72,12 +101,27 @@ private:
     void SendRtcpFeedback(const Address& clientAddress); // 发送RTCP反馈
     void Playback(const Address& clientAddress);      // 模拟播放
 
+    // 播放逻辑
+    void SchedulePlayback(const Address& clientAddress);
+    void TryPlayback(const Address& clientAddress);
+    void HandleStutter(const Address& clientAddress);
+
+    // 日志逻辑
+    void ScheduleLog(const Address& clientAddress);
+    void LogPlaybackStats(const Address& clientAddress);
+
+
     Ptr<Socket> m_socket;      // 服务器的Socket
     uint16_t m_port;           // 监听的端口
     Time m_reportInterval;     // 统计报告的间隔
 
     // 存储每个客户端会话的map，key是客户端地址
     std::map<Address, ClientSession> m_sessions;
+
+    // 日志记录
+    std::string m_logFileName;
+    std::ofstream m_logFile;
+    Time m_logInterval;
 };
 
 } // namespace ns3

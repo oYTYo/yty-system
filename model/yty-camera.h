@@ -18,7 +18,7 @@ namespace ns3 {
 class Socket;
 class Packet;
 
-// ▼▼▼ FIX: Converted RtpHeader from a struct to a proper ns3::Header class ▼▼▼
+
 class RtpHeader : public Header
 {
 public:
@@ -46,14 +46,18 @@ public:
     void SetTotalPackets(uint32_t count) { m_totalPackets = count; }
     uint32_t GetTotalPackets() const { return m_totalPackets; }
 
+    void SetPacketsInFrame(uint32_t count) { m_packetsInFrame = count; }  // 播放优化
+    uint32_t GetPacketsInFrame() const { return m_packetsInFrame; }  // 播放优化
+
 
 private:
     uint64_t m_timestamp;   // Changed to 64-bit for nanosecond precision
     uint32_t m_frameSeq;
     uint32_t m_packetSeq;
     uint32_t m_totalPackets;
+    uint32_t m_packetsInFrame;  // 播放优化
 };
-// ▲▲▲ End of RtpHeader class fix ▲▲▲
+
 
 
 /**

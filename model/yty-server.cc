@@ -12,6 +12,11 @@
 #include "ns3/uinteger.h"
 #include "ns3/double.h"
 
+#include "ns3/string.h"
+#include <fstream>
+#include <string>
+
+
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE("YtyServerApplication");
@@ -30,6 +35,15 @@ TypeId YtyServer::GetTypeId(void)
         .AddAttribute("ReportInterval", "Interval for sending RTCP reports.",
                       TimeValue(MilliSeconds(50)),
                       MakeTimeAccessor(&YtyServer::m_reportInterval),
+                      MakeTimeChecker())
+        // 为日志记录添加新属性
+        .AddAttribute("LogFile", "File to log playback statistics.",
+                      StringValue("scratch/play_status.txt"),
+                      MakeStringAccessor(&YtyServer::m_logFileName),
+                      MakeStringChecker())
+        .AddAttribute("LogInterval", "Interval for logging playback stats.",
+                      TimeValue(Seconds(1.0)),
+                      MakeTimeAccessor(&YtyServer::m_logInterval),
                       MakeTimeChecker());
     return tid;
 }
@@ -55,6 +69,13 @@ void YtyServer::StartApplication(void)
         }
     }
     m_socket->SetRecvCallback(MakeCallback(&YtyServer::HandleRead, this));
+
+    // 打开日志文件并写入表头
+    m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
+    if (m_logFile.is_open())
+    {
+        m_logFile << "Time(s)\tClientAddr\tPlayedFrames\tStutterEvents\tStutterRate" << std::endl;
+    }
 }
 
 void YtyServer::StopApplication(void)
@@ -62,14 +83,23 @@ void YtyServer::StopApplication(void)
     for (auto const& [addr, session] : m_sessions) {
         if(session.reportEvent.IsPending()) {
             Simulator::Cancel(session.reportEvent);
+            Simulator::Cancel(session.playbackEvent);
+            Simulator::Cancel(session.stutterTimeoutEvent);
+            Simulator::Cancel(session.logStatsEvent);
         }
     }
     m_sessions.clear();
+
+    if (m_logFile.is_open())
+    {
+        m_logFile.close();
+    }
 
     if (m_socket)
     {
         m_socket->Close();
     }
+
 }
 
 void YtyServer::HandleRead(Ptr<Socket> socket)
@@ -93,28 +123,45 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
 
 void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
 {
+    // 如果会话还没有通过 PLAY 请求启动，则忽略数据包
     if (m_sessions.find(from) == m_sessions.end())
     {
-        return; // Ignore RTP from unknown clients
+        return;
     }
     
     ClientSession& session = m_sessions[from];
     uint32_t packetSize = packet->GetSize();
+    Time now = Simulator::Now();
 
+    // 创建一个副本用于读取头，因为 RemoveHeader 会修改原始包
+    Ptr<Packet> packetCopy = packet->Copy();
     RtpHeader rtpHeader;
-    packet->RemoveHeader(rtpHeader);
+    packetCopy->RemoveHeader(rtpHeader);
 
     Time sentTime = NanoSeconds(rtpHeader.GetTimestamp());
-    Time now = Simulator::Now();
     Time delay = now - sentTime;
     
+    // 更新网络统计
     session.intervalReceivedPackets++;
     session.intervalReceivedBytes += packetSize;
     session.intervalTotalDelay += delay;
-    
     uint32_t cumulativeSentCount = rtpHeader.GetTotalPackets();
     if (cumulativeSentCount > session.maxSeenSentPackets) {
         session.maxSeenSentPackets = cumulativeSentCount;
+    }
+
+    // --- 新的抖动缓冲逻辑 ---
+    uint32_t frameSeq = rtpHeader.GetFrameSeq();
+    uint32_t packetSeq = rtpHeader.GetPacketSeq();
+
+    // 将数据包存入抖动缓冲区
+    session.buffer[frameSeq][packetSeq] = {packet, now};
+    NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server buffered packet for frame " << frameSeq << ", packet " << packetSeq);
+
+    // 如果这就是我们当前正在等待的帧，立即尝试播放它
+    if(frameSeq == session.nextFrameToPlay)
+    {
+        TryPlayback(from);
     }
 }
 
@@ -131,8 +178,32 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
         if (m_sessions.find(from) == m_sessions.end())
         {
             m_sessions[from] = ClientSession();
-            // ▼▼▼ 【核心修正】: 在会话创建时，就将当前时间设为计时起点！ ▼▼▼
             m_sessions[from].lastReportTime = Simulator::Now();
+
+            // --- 新增：解析帧率 ---
+            std::string header_key = "X-Frame-Rate: ";
+            size_t pos = request.find(header_key);
+            if (pos != std::string::npos)
+            {
+                // 提取帧率字符串并转换为整数
+                std::string rate_str = request.substr(pos + header_key.length());
+                try {
+                    uint32_t negotiatedRate = std::stoul(rate_str);
+                    m_sessions[from].frameRate = negotiatedRate;
+                    NS_LOG_INFO("Negotiated frame rate with " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ": " << negotiatedRate << " fps");
+                } catch (const std::exception& e) {
+                    NS_LOG_WARN("Failed to parse frame rate from request. Using default: " << m_sessions[from].frameRate);
+                }
+            }
+            else
+            {
+                NS_LOG_INFO("No frame rate header found. Using default: " << m_sessions[from].frameRate);
+            }
+            // --- 解析结束 ---
+
+            // --- 启动播放和日志记录 ---
+            SchedulePlayback(from);
+            ScheduleLog(from);
         }
         ScheduleReport(from);
     }
@@ -218,6 +289,127 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     session.lastReportTime = now;
 
     ScheduleReport(clientAddress);
+}
+
+
+// --- 新的播放和日志记录函数 ---
+
+void YtyServer::SchedulePlayback(const Address& clientAddress)
+{
+    if (m_sessions.count(clientAddress)) {
+        // 使用会话中存储的、协商好的帧率
+        ClientSession& session = m_sessions[clientAddress];
+        if (session.frameRate == 0) return; // 防止除以0
+
+        Time playbackInterval = Seconds(1.0 / session.frameRate);
+        m_sessions[clientAddress].playbackEvent = Simulator::Schedule(playbackInterval, &YtyServer::TryPlayback, this, clientAddress);
+    }
+}
+
+void YtyServer::TryPlayback(const Address& clientAddress)
+{
+    if (!m_sessions.count(clientAddress)) return;
+
+    ClientSession& session = m_sessions[clientAddress];
+    uint32_t frameToPlay = session.nextFrameToPlay;
+    
+    // 检查帧是否存在于缓冲区中
+    auto it = session.buffer.find(frameToPlay);
+    if (it == session.buffer.end())
+    {
+        // 帧完全不存在。安排一个卡顿超时。
+        if (!session.stutterTimeoutEvent.IsPending()) {
+             session.stutterTimeoutEvent = Simulator::Schedule(MilliSeconds(50), &YtyServer::HandleStutter, this, clientAddress);
+        }
+        return; // 等待数据包或卡顿超时
+    }
+
+    // 帧存在，检查它是否完整。
+    // 为此，我们需要知道这一帧总共有多少包。
+    // 我们可以查看我们收到的该帧第一个包的头部信息。
+    auto& packetsInFrameMap = it->second;
+    Ptr<Packet> firstPacket = packetsInFrameMap.begin()->second.packet->Copy();
+    RtpHeader header;
+    firstPacket->RemoveHeader(header);
+    uint32_t requiredPackets = header.GetPacketsInFrame();
+
+    if (packetsInFrameMap.size() >= requiredPackets)
+    {
+        // 帧是完整的！
+        NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server PLAYED frame " << frameToPlay);
+        
+        // 取消为该帧设置的任何卡顿超时，因为它现在已经到达。
+        if (session.stutterTimeoutEvent.IsPending()) {
+            Simulator::Cancel(session.stutterTimeoutEvent);
+        }
+
+        session.playedFrames++;
+        session.nextFrameToPlay++; // 移动到下一帧
+        session.buffer.erase(frameToPlay); // 清理缓冲区
+
+        // 安排下一次播放尝试。
+        SchedulePlayback(clientAddress);
+    }
+    else
+    {
+        // 帧已开始到达但尚不完整。如果卡顿计时器还未运行，则启动它。
+        if (!session.stutterTimeoutEvent.IsPending()) {
+             session.stutterTimeoutEvent = Simulator::Schedule(MilliSeconds(50), &YtyServer::HandleStutter, this, clientAddress);
+        }
+    }
+}
+
+void YtyServer::HandleStutter(const Address& clientAddress)
+{
+    if (!m_sessions.count(clientAddress)) return;
+
+    ClientSession& session = m_sessions[clientAddress];
+    NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, STUTTER detected for frame " << session.nextFrameToPlay << ". Skipping.");
+
+    session.stutterEvents++;
+    session.nextFrameToPlay++; // 跳过迟到的帧
+
+    // 跳过之后，立即尝试播放下一帧。
+    SchedulePlayback(clientAddress);
+}
+
+
+void YtyServer::ScheduleLog(const Address& clientAddress)
+{
+    if (m_sessions.count(clientAddress)) {
+        m_sessions[clientAddress].logStatsEvent = Simulator::Schedule(m_logInterval, &YtyServer::LogPlaybackStats, this, clientAddress);
+    }
+}
+
+
+void YtyServer::LogPlaybackStats(const Address& clientAddress)
+{
+    if (!m_sessions.count(clientAddress)) return;
+
+    ClientSession& session = m_sessions[clientAddress];
+    
+    double stutterRate = 0;
+    // 分母是总的尝试播放帧数（已播放的 + 卡顿跳过的）
+    if ((session.playedFrames + session.stutterEvents) > 0)
+    {
+        stutterRate = static_cast<double>(session.stutterEvents) / (session.playedFrames + session.stutterEvents);
+    }
+
+    if (m_logFile.is_open())
+    {
+        m_logFile << Simulator::Now().GetSeconds() << "\t"
+                  << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << "\t"
+                  << session.playedFrames << "\t"
+                  << session.stutterEvents << "\t"
+                  << stutterRate << std::endl;
+    }
+    
+    // 为下一个统计周期重置统计量
+    session.playedFrames = 0;
+    session.stutterEvents = 0;
+
+    // 安排下一次日志事件
+    ScheduleLog(clientAddress);
 }
 
 } // namespace ns3
