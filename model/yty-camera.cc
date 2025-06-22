@@ -10,6 +10,7 @@
 #include "ns3/socket-factory.h"
 #include "ns3/packet.h"
 #include "ns3/uinteger.h"
+#include "ns3/boolean.h" // <<< 新增：包含布尔值头文件
 #include "ns3/string.h"
 #include <sstream>
 
@@ -21,36 +22,13 @@ NS_OBJECT_ENSURE_REGISTERED(YtyCamera);
 // RtpHeader 类的实现代码
 NS_OBJECT_ENSURE_REGISTERED(RtpHeader);
 TypeId RtpHeader::GetTypeId(void) { static TypeId tid = TypeId("ns3::RtpHeader").SetParent<Header>().SetGroupName("Applications").AddConstructor<RtpHeader>(); return tid; }
-
 RtpHeader::RtpHeader() : m_timestamp(0), m_frameSeq(0), m_packetSeq(0), m_totalPackets(0) {}
-
 RtpHeader::~RtpHeader() {}
-
 TypeId RtpHeader::GetInstanceTypeId(void) const { return GetTypeId(); }
-
-void RtpHeader::Print(std::ostream &os) const {
-    os << "Timestamp=" << m_timestamp << " FrameSeq=" << m_frameSeq << " PacketSeq=" << m_packetSeq << " TotalPackets=" << m_totalPackets << " PacketsInFrame=" << m_packetsInFrame;
-}
-
-uint32_t RtpHeader::GetSerializedSize(void) const {
-    return sizeof(m_timestamp) + sizeof(m_frameSeq) + sizeof(m_packetSeq) + sizeof(m_totalPackets) + sizeof(m_packetsInFrame);
-}
-
-void RtpHeader::Serialize(Buffer::Iterator start) const { 
-    start.WriteHtonU64(m_timestamp); 
-    start.WriteHtonU32(m_frameSeq); 
-    start.WriteHtonU32(m_packetSeq); 
-    start.WriteHtonU32(m_totalPackets); 
-    start.WriteHtonU32(m_packetsInFrame);
-    }
-
-uint32_t RtpHeader::Deserialize(Buffer::Iterator start) { 
-    m_timestamp = start.ReadNtohU64(); 
-    m_frameSeq = start.ReadNtohU32(); 
-    m_packetSeq = start.ReadNtohU32(); 
-    m_totalPackets = start.ReadNtohU32(); 
-    m_packetsInFrame = start.ReadNtohU32(); 
-    return GetSerializedSize(); }
+void RtpHeader::Print(std::ostream &os) const { os << "Timestamp=" << m_timestamp << " FrameSeq=" << m_frameSeq << " PacketSeq=" << m_packetSeq << " TotalPackets=" << m_totalPackets << " PacketsInFrame=" << m_packetsInFrame; }
+uint32_t RtpHeader::GetSerializedSize(void) const { return sizeof(m_timestamp) + sizeof(m_frameSeq) + sizeof(m_packetSeq) + sizeof(m_totalPackets) + sizeof(m_packetsInFrame); }
+void RtpHeader::Serialize(Buffer::Iterator start) const { start.WriteHtonU64(m_timestamp); start.WriteHtonU32(m_frameSeq); start.WriteHtonU32(m_packetSeq); start.WriteHtonU32(m_totalPackets); start.WriteHtonU32(m_packetsInFrame); }
+uint32_t RtpHeader::Deserialize(Buffer::Iterator start) { m_timestamp = start.ReadNtohU64(); m_frameSeq = start.ReadNtohU32(); m_packetSeq = start.ReadNtohU32(); m_totalPackets = start.ReadNtohU32(); m_packetsInFrame = start.ReadNtohU32(); return GetSerializedSize(); }
 
 
 TypeId YtyCamera::GetTypeId(void)
@@ -64,8 +42,9 @@ TypeId YtyCamera::GetTypeId(void)
         .AddAttribute("PacketSize", "The size of packets sent.", UintegerValue(1400), MakeUintegerAccessor(&YtyCamera::m_packetSize), MakeUintegerChecker<uint32_t>())
         .AddAttribute("RemoteAddress", "The destination address of the outbound packets", AddressValue(), MakeAddressAccessor(&YtyCamera::m_peerAddress), MakeAddressChecker())
         .AddAttribute("RemotePort", "The destination port of the outbound packets", UintegerValue(9), MakeUintegerAccessor(&YtyCamera::m_peerPort), MakeUintegerChecker<uint16_t>())
-        // ▼▼▼ 修改部分 1：添加LogFile属性 ▼▼▼
-        .AddAttribute("LogFile", "File to log statistics.", StringValue("scratch/camera_stats.txt"), MakeStringAccessor(&YtyCamera::m_logFileName), MakeStringChecker());
+        .AddAttribute("LogFile", "File to log statistics.", StringValue("scratch/camera_stats.txt"), MakeStringAccessor(&YtyCamera::m_logFileName), MakeStringChecker())
+        // ▼▼▼ 新增属性 ▼▼▼
+        .AddAttribute("EnableLog", "Enable or disable logging.", BooleanValue(true), MakeBooleanAccessor(&YtyCamera::m_logEnabled), MakeBooleanChecker());
     return tid;
 }
 
@@ -76,12 +55,12 @@ YtyCamera::YtyCamera()
       m_packetSize(1400),
       m_running(false),
       m_frameSeqCounter(0),
-      m_cumulativePacketsSent(0), // <<< 新增：初始化计数器
+      m_cumulativePacketsSent(0),
       m_throughput(0.0),
       m_delay(Seconds(0.0)),
       m_lossRate(0.0),
-      // ▼▼▼ 修改部分 2：在构造函数中初始化m_logFileName ▼▼▼
-      m_logFileName("camera_stats.txt")
+      m_logFileName("camera_stats.txt"),
+      m_logEnabled(true) // <<< 新增：默认启用日志
 {
     NS_LOG_FUNCTION(this);
 }
@@ -110,11 +89,14 @@ void YtyCamera::StartApplication(void)
     NS_LOG_FUNCTION(this);
     m_running = true;
 
-    // ▼▼▼ 修改部分 3：打开文件并写入表头 ▼▼▼
-    m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
-    if (m_logFile.is_open())
+    // ▼▼▼ 修改部分：检查日志开关 ▼▼▼
+    if (m_logEnabled)
     {
-        m_logFile << "Timestamp(s)\tThroughput(bps)\tDelay(ms)\tLossRate" << std::endl;
+        m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
+        if (m_logFile.is_open())
+        {
+            m_logFile << "Timestamp(s)\tThroughput(bps)\tDelay(ms)\tLossRate" << std::endl;
+        }
     }
 
     if (!m_socket)
@@ -129,13 +111,9 @@ void YtyCamera::StartApplication(void)
     }
     m_socket->SetRecvCallback(MakeCallback(&YtyCamera::HandleRead, this));
 
-    
-    // 1. 根据打包逻辑，计算实际的生产码率
     uint32_t frameSizeInBits = m_bitrate / m_frameRate;
     uint32_t numPacketsInFrame = (frameSizeInBits / 8 + m_packetSize - 1) / m_packetSize;
     uint32_t actualBitrate = numPacketsInFrame * m_packetSize * 8 * m_frameRate;
-
-    // 2. 使用实际码率来设置发送速率
     m_sendRate = DataRate(actualBitrate);
     
     SendRtspRequest("PLAY");
@@ -150,8 +128,8 @@ void YtyCamera::StopApplication(void)
     NS_LOG_FUNCTION(this);
     m_running = false;
 
-    // ▼▼▼ 修改部分 4：关闭文件流 ▼▼▼
-    if (m_logFile.is_open())
+    // ▼▼▼ 修改部分：检查日志开关 ▼▼▼
+    if (m_logEnabled && m_logFile.is_open())
     {
         m_logFile.close();
     }
@@ -184,14 +162,13 @@ void YtyCamera::Encoder(void)
     {
         Ptr<Packet> packet = Create<Packet>(m_packetSize);
         
-        m_cumulativePacketsSent++; // <<< 新增：每次打包前，先递增总包数计数器
+        m_cumulativePacketsSent++;
 
         RtpHeader rtpHeader;
         rtpHeader.SetTimestamp(Simulator::Now().GetNanoSeconds());
         rtpHeader.SetFrameSeq(m_frameSeqCounter);
         rtpHeader.SetPacketSeq(i);
         rtpHeader.SetTotalPackets(m_cumulativePacketsSent);
-
         rtpHeader.SetPacketsInFrame(numPacketsInFrame); 
         
         packet->AddHeader(rtpHeader);
@@ -240,15 +217,13 @@ void YtyCamera::SendRtpPacket(Ptr<Packet> packet)
 void YtyCamera::SendRtspRequest(std::string method)
 {
     std::ostringstream msg;
-
-    // 只在PLAY请求中添加自定义的帧率头字段,协商一下播放帧率
     if (method == "PLAY")
     {
         msg << "PLAY rtsp://server/video RTSP/1.0\r\n"
             << "CSeq: 1\r\n"
-            << "X-Frame-Rate: " << m_frameRate << "\r\n\r\n"; // 添加此行来携带帧率信息
+            << "X-Frame-Rate: " << m_frameRate << "\r\n\r\n";
     }
-    else // 对于其他请求 (如 TEARDOWN)，保持原样
+    else
     {
         msg << method << " rtsp://server/video RTSP/1.0\r\n"
             << "CSeq: 1\r\n\r\n";
@@ -270,13 +245,11 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
         uint32_t expectedSize = sizeof(double) + sizeof(int64_t) + sizeof(double);
         if (packet->GetSize() >= expectedSize)
         {
-            // 【已修正】: 使用 new/delete[] 来代替可变长度数组(VLA)
             uint8_t* buffer = new uint8_t[expectedSize];
             packet->CopyData(buffer, expectedSize);
             
             uint32_t offset = 0;
 
-            // 从缓冲区解析数据
             m_throughput = *(reinterpret_cast<double*>(buffer + offset));
             offset += sizeof(double);
 
@@ -286,7 +259,6 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
 
             m_lossRate = *(reinterpret_cast<double*>(buffer + offset));
             
-            // 【重要】: 释放动态分配的内存
             delete[] buffer;
 
             NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() 
@@ -303,25 +275,12 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
 void YtyCamera::PathDecision(void)
 {
     // 此处是实现路径选择的地方，现在写实现拥塞控制和码率自适应逻辑的地方
-    // 例如：如果丢包率高于5%，并且当前码率高于最低码率，则降低码率
-    // if (m_lossRate > 0.05 && m_bitrate > 500000)
-    // {
-    //     m_bitrate -= 100000; // 降低100kbps
-    //     m_sendRate = DataRate(m_bitrate);
-    //     NS_LOG_INFO(Simulator::Now().GetSeconds() << "s: Congestion detected. Reducing bitrate to " << m_bitrate);
-    // }
-    // else if (m_lossRate < 0.01 && m_bitrate < 2000000) // 如果网络状况良好，可以尝试增加码率
-    // {
-    //     m_bitrate += 100000;
-    //     m_sendRate = DataRate(m_bitrate);
-    //     NS_LOG_INFO(Simulator::Now().GetSeconds() << "s: Network is good. Increasing bitrate to " << m_bitrate);
-    // }
 }
 
-// ▼▼▼ 修改部分 6：添加写文件函数的完整实现 ▼▼▼
 void YtyCamera::WriteStatsToFile()
 {
-    if (m_logFile.is_open())
+    // ▼▼▼ 修改部分：检查日志开关 ▼▼▼
+    if (m_logEnabled && m_logFile.is_open())
     {
         m_logFile << Simulator::Now().GetSeconds() << "\t"
                   << m_throughput << "\t"

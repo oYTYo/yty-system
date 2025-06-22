@@ -8,7 +8,7 @@
 #include "ns3/ptr.h"
 #include "ns3/address.h"
 #include "ns3/traced-callback.h"
-#include "ns3/data-rate.h" // <<< FIX: Added missing header for DataRate
+#include "ns3/data-rate.h"
 
 #include <queue>
 #include <fstream>
@@ -46,16 +46,16 @@ public:
     void SetTotalPackets(uint32_t count) { m_totalPackets = count; }
     uint32_t GetTotalPackets() const { return m_totalPackets; }
 
-    void SetPacketsInFrame(uint32_t count) { m_packetsInFrame = count; }  // 播放优化
-    uint32_t GetPacketsInFrame() const { return m_packetsInFrame; }  // 播放优化
+    void SetPacketsInFrame(uint32_t count) { m_packetsInFrame = count; }
+    uint32_t GetPacketsInFrame() const { return m_packetsInFrame; }
 
 
 private:
-    uint64_t m_timestamp;   // Changed to 64-bit for nanosecond precision
+    uint64_t m_timestamp;
     uint32_t m_frameSeq;
     uint32_t m_packetSeq;
     uint32_t m_totalPackets;
-    uint32_t m_packetsInFrame;  // 播放优化
+    uint32_t m_packetsInFrame;
 };
 
 
@@ -95,7 +95,7 @@ private:
     uint32_t m_bitrate;
     uint32_t m_frameRate;
     uint32_t m_packetSize;
-    DataRate m_sendRate; // This now compiles correctly
+    DataRate m_sendRate;
 
     EventId m_sendEvent;
     EventId m_encoderEvent;
@@ -104,8 +104,7 @@ private:
     std::queue<Ptr<Packet>> m_sendBuffer;
 
     uint32_t m_frameSeqCounter;
-
-    uint32_t m_cumulativePacketsSent; // <<< 新增：累计发送的总包数
+    uint32_t m_cumulativePacketsSent;
     
     double m_throughput;
     Time m_delay;
@@ -113,10 +112,9 @@ private:
 
     std::string m_logFileName;
     std::ofstream m_logFile;
+    bool m_logEnabled; // <<< 新增：日志启用/禁用开关
 };
 
 } // namespace ns3
 
 #endif /* YTY_CAMERA_H */
-
-// 我测试一下git
