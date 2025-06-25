@@ -70,12 +70,13 @@ void YtyServer::StartApplication(void)
     }
     m_socket->SetRecvCallback(MakeCallback(&YtyServer::HandleRead, this));
 
-    // 打开日志文件并写入表头
+    // ▼▼▼ 【修改】打开日志文件并写入新的表头 ▼▼▼
     m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
     if (m_logFile.is_open())
     {
-        m_logFile << "Time(s)\tClientAddr\tPlayedFrames\tStutterEvents\tStutterRate" << std::endl;
+        m_logFile << "Time(s)\tClientAddr\tThroughput(bps)\tDelay(ms)\tLossRate\tPlayedFrames\tStutterEvents\tStutterRate" << std::endl;
     }
+    // ▲▲▲ 【修改】打开日志文件并写入新的表头 ▲▲▲
 }
 
 void YtyServer::StopApplication(void)
@@ -280,6 +281,12 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
                 << "Packets in interval: " << session.intervalReceivedPackets);
     // ▲▲▲ 添加调试日志 ▲▲▲
 
+    // ▼▼▼ 【新增】为日志记录累加RTCP统计信息 ▼▼▼
+    session.logIntervalSumThroughput += throughput;
+    session.logIntervalSumDelay += avgDelay;
+    session.logIntervalSumLossRate += lossRate;
+    session.logIntervalRtcpCount++;
+    // ▲▲▲ 【新增】为日志记录累加RTCP统计信息 ▲▲▲
     
     // 【至关重要】重置周期统计变量，并更新状态
     session.intervalReceivedPackets = 0;
@@ -388,6 +395,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 
     ClientSession& session = m_sessions[clientAddress];
     
+    // --- 计算播放统计 ---
     double stutterRate = 0;
     // 分母是总的尝试播放帧数（已播放的 + 卡顿跳过的）
     if ((session.playedFrames + session.stutterEvents) > 0)
@@ -395,18 +403,44 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         stutterRate = static_cast<double>(session.stutterEvents) / (session.playedFrames + session.stutterEvents);
     }
 
+    // ▼▼▼ 【新增】计算网络指标的平均值 ▼▼▼
+    double avgThroughput = 0.0;
+    double avgDelayMs = 0.0;
+    double avgLossRate = 0.0;
+
+    if (session.logIntervalRtcpCount > 0)
+    {
+        avgThroughput = session.logIntervalSumThroughput / session.logIntervalRtcpCount;
+        avgDelayMs = (session.logIntervalSumDelay.GetMilliSeconds()) / session.logIntervalRtcpCount;
+        avgLossRate = session.logIntervalSumLossRate / session.logIntervalRtcpCount;
+    }
+    // ▲▲▲ 【新增】计算网络指标的平均值 ▲▲▲
+
+    // --- 写入日志文件 ---
     if (m_logFile.is_open())
     {
+        // ▼▼▼ 【修改】写入包含平均网络指标的扩展日志行 ▼▼▼
         m_logFile << Simulator::Now().GetSeconds() << "\t"
                   << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << "\t"
+                  << avgThroughput << "\t"
+                  << avgDelayMs << "\t"
+                  << avgLossRate << "\t"
                   << session.playedFrames << "\t"
                   << session.stutterEvents << "\t"
                   << stutterRate << std::endl;
+        // ▲▲▲ 【修改】写入包含平均网络指标的扩展日志行 ▲▲▲
     }
     
-    // 为下一个统计周期重置统计量
+    // --- 为下一个统计周期重置所有日志相关的统计量 ---
     session.playedFrames = 0;
     session.stutterEvents = 0;
+
+    // ▼▼▼ 【新增】重置网络指标累加器 ▼▼▼
+    session.logIntervalSumThroughput = 0.0;
+    session.logIntervalSumDelay = Seconds(0);
+    session.logIntervalSumLossRate = 0.0;
+    session.logIntervalRtcpCount = 0;
+    // ▲▲▲ 【新增】重置网络指标累加器 ▼▼▲
 
     // 安排下一次日志事件
     ScheduleLog(clientAddress);

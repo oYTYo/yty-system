@@ -60,7 +60,7 @@ YtyCamera::YtyCamera()
       m_delay(Seconds(0.0)),
       m_lossRate(0.0),
       m_logFileName("camera_stats.txt"),
-      m_logEnabled(true) // <<< 新增：默认启用日志
+      m_logEnabled(false) // <<< 新增：默认启用日志
 {
     NS_LOG_FUNCTION(this);
 }

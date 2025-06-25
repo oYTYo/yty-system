@@ -76,6 +76,13 @@ private:
         uint32_t stutterEvents;         // 当前1秒周期内的总卡顿次数
         EventId  logStatsEvent;         // 触发日志记录的事件
 
+        // ▼▼▼ 【新增】用于日志记录的RTCP指标累加器 ▼▼▼
+        double   logIntervalSumThroughput; // 日志周期内，吞吐率的总和
+        Time     logIntervalSumDelay;      // 日志周期内，延迟的总和
+        double   logIntervalSumLossRate;   // 日志周期内，丢包率的总和
+        uint32_t logIntervalRtcpCount;     // 日志周期内，收到的RTCP包数量
+        // ▲▲▲ 【新增】用于日志记录的RTCP指标累加器 ▲▲▲
+
         // 构造函数
         ClientSession() :
             intervalReceivedPackets(0),
@@ -87,9 +94,15 @@ private:
             nextFrameToPlay(0),
             frameRate(30), // 给一个默认值, 以防协商失败
             playedFrames(0),
-            stutterEvents(0)
-            
+            stutterEvents(0),
 
+            // ▼▼▼ 【新增】初始化新增的成员变量 ▼▼▼
+            logIntervalSumThroughput(0.0),
+            logIntervalSumDelay(Seconds(0)),
+            logIntervalSumLossRate(0.0),
+            logIntervalRtcpCount(0)
+            // ▲▲▲ 【新增】初始化新增的成员变量 ▲▲▲
+            
         {
         }
     };
