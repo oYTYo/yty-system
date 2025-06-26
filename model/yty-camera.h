@@ -130,6 +130,9 @@ private:
     bool m_logEnabled; // <<< 新增：日志启用/禁用开关
 
     Ptr<BitrateSampler> m_bitrateSampler; // <<< 新增了一个指向 BitrateSampler 对象的智能指针 Ptr<BitrateSampler> m_bitrateSampler，让每个摄像头实例都可以持有一个采样器。
+
+    uint32_t m_cameraId; // 摄像头的唯一ID
+
 };
 
 } // namespace ns3

@@ -56,6 +56,20 @@ void YtyServer::DoDispose(void)
     Application::DoDispose();
 }
 
+
+// VVV 新增: 实现客户端信息注册方法 VVV
+void YtyServer::RegisterClientInfo(const Ipv4Address& clientIp, const ClientInfo& info)
+{
+    NS_LOG_FUNCTION(this << clientIp << info.accessType << info.region);
+    m_clientInfoRegistry[clientIp] = info;
+    NS_LOG_INFO("Registered: IP=" << clientIp 
+                << ", CamID=" << info.cameraId 
+                << ", Type=" << info.accessType
+                << ", Region=" << info.region);
+}
+// ^^^ 新增 ^^^
+
+
 void YtyServer::StartApplication(void)
 {
     if (!m_socket)
@@ -74,7 +88,7 @@ void YtyServer::StartApplication(void)
     m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
     if (m_logFile.is_open())
     {
-        m_logFile << "Time(s)\tClientAddr\tThroughput(bps)\tDelay(ms)\tLossRate\tPlayedFrames\tStutterEvents\tStutterRate" << std::endl;
+        m_logFile << "Time(s)\tClientAddr\tThroughput(bps)\tDelay(ms)\tLossRate\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion" << std::endl;
     }
     // ▲▲▲ 【修改】打开日志文件并写入新的表头 ▲▲▲
 }
@@ -174,12 +188,27 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
     std::string request(reinterpret_cast<char*>(buffer));
 
     if (request.rfind("PLAY", 0) == 0)
-    {
-        NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server received PLAY request from " << InetSocketAddress::ConvertFrom(from).GetIpv4());
+    {   
+        Ipv4Address clientIp = InetSocketAddress::ConvertFrom(from).GetIpv4();
+        NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server received PLAY request from " << clientIp);
         if (m_sessions.find(from) == m_sessions.end())
         {
+            // m_sessions[from] = ClientSession();
+            // m_sessions[from].lastReportTime = Simulator::Now();
+
+            // VVV 修改: 核心逻辑 - 从注册表查找信息 VVV
+            auto it = m_clientInfoRegistry.find(clientIp);
+            if (it == m_clientInfoRegistry.end())
+            {
+                NS_LOG_WARN("Server received PLAY from an unregistered IP: " << clientIp << ". Ignoring.");
+                return;
+            }
             m_sessions[from] = ClientSession();
-            m_sessions[from].lastReportTime = Simulator::Now();
+            ClientSession& session = m_sessions[from];
+            session.lastReportTime = Simulator::Now();
+            // 将预先注册的信息填充到当前会话中
+            session.clientInfo = it->second; 
+            // ^^^ 修改 ^^^
 
             // --- 新增：解析帧率 ---
             std::string header_key = "X-Frame-Rate: ";
@@ -419,7 +448,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     // --- 写入日志文件 ---
     if (m_logFile.is_open())
     {
-        // ▼▼▼ 【修改】写入包含平均网络指标的扩展日志行 ▼▼▼
+        // VVV 修改: 从 session.clientInfo 获取数据并写入日志 VVV
         m_logFile << Simulator::Now().GetSeconds() << "\t"
                   << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << "\t"
                   << avgThroughput << "\t"
@@ -427,8 +456,11 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
                   << avgLossRate << "\t"
                   << session.playedFrames << "\t"
                   << session.stutterEvents << "\t"
-                  << stutterRate << std::endl;
-        // ▲▲▲ 【修改】写入包含平均网络指标的扩展日志行 ▲▲▲
+                  << stutterRate << "\t"
+                  << session.clientInfo.cameraId << "\t"
+                  << session.clientInfo.accessType << "\t"
+                  << session.clientInfo.region << std::endl;
+        // ^^^ 修改 ^^^
     }
     
     // --- 为下一个统计周期重置所有日志相关的统计量 ---

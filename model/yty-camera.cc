@@ -45,7 +45,7 @@ TypeId YtyCamera::GetTypeId(void)
         .AddAttribute("RemoteAddress", "The destination address of the outbound packets", AddressValue(), MakeAddressAccessor(&YtyCamera::m_peerAddress), MakeAddressChecker())
         .AddAttribute("RemotePort", "The destination port of the outbound packets", UintegerValue(9), MakeUintegerAccessor(&YtyCamera::m_peerPort), MakeUintegerChecker<uint16_t>())
         .AddAttribute("LogFile", "File to log statistics.", StringValue("scratch/camera_stats.txt"), MakeStringAccessor(&YtyCamera::m_logFileName), MakeStringChecker())
-        // ▼▼▼ 新增属性 ▼▼▼
+        .AddAttribute("CameraId", "此摄像头的唯一ID.", UintegerValue(0), MakeUintegerAccessor(&YtyCamera::m_cameraId), MakeUintegerChecker<uint32_t>())
         .AddAttribute("EnableLog", "Enable or disable logging.", BooleanValue(true), MakeBooleanAccessor(&YtyCamera::m_logEnabled), MakeBooleanChecker());
     return tid;
 }
@@ -63,7 +63,9 @@ YtyCamera::YtyCamera()
       m_lossRate(0.0),
       m_logFileName("camera_stats.txt"),
       m_logEnabled(false), // <<< 新增：默认启用日志
-      m_bitrateSampler(nullptr) // <<< 新增：初始化采样器指针
+      m_bitrateSampler(nullptr), // <<< 新增：初始化采样器指针
+      // 摄像头ID
+      m_cameraId(0)
 {
     NS_LOG_FUNCTION(this);
 }
@@ -259,7 +261,8 @@ void YtyCamera::SendRtspRequest(std::string method)
     {
         msg << "PLAY rtsp://server/video RTSP/1.0\r\n"
             << "CSeq: 1\r\n"
-            << "X-Frame-Rate: " << m_frameRate << "\r\n\r\n";
+            << "X-Frame-Rate: " << m_frameRate << "\r\n"
+            << "X-Camera-ID: " << m_cameraId << "\r\n\r\n";
     }
     else
     {

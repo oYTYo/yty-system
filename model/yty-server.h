@@ -9,6 +9,7 @@
 #include "ns3/address.h"
 #include "ns3/traced-callback.h"
 #include "yty-camera.h" // 需要包含摄像头头文件以使用RtpHeader
+#include "ns3/ipv4-address.h" // <<< 新增: 包含IPv4地址头文件
 
 #include <map>
 #include <vector>
@@ -31,6 +32,28 @@ public:
     static TypeId GetTypeId(void);
     YtyServer();
     virtual ~YtyServer();
+
+    // VVV 新增: 客户端元数据结构体和注册方法 VVV
+    /**
+     * @brief 存储一个客户端网络接口的所有相关信息
+     */
+    struct ClientInfo {
+        uint32_t    cameraId;
+        std::string accessType;
+        std::string region;
+
+        ClientInfo() : cameraId(0), accessType("Unknown"), region("Unknown") {}
+        ClientInfo(uint32_t id, std::string type, std::string reg) 
+            : cameraId(id), accessType(type), region(reg) {}
+    };
+
+    /**
+     * @brief 从仿真脚本中注册一个客户端IP地址及其关联信息
+     * @param clientIp 客户端网络接口的IP地址
+     * @param info 包含该接口所有元数据的结构体
+     */
+    void RegisterClientInfo(const Ipv4Address& clientIp, const ClientInfo& info);
+    // ^^^ 新增 ^^^
 
 protected:
     virtual void DoDispose(void);
@@ -83,6 +106,10 @@ private:
         uint32_t logIntervalRtcpCount;     // 日志周期内，收到的RTCP包数量
         // ▲▲▲ 【新增】用于日志记录的RTCP指标累加器 ▲▲▲
 
+        // VVV 修改: 直接包含一个ClientInfo结构体 VVV
+        ClientInfo clientInfo;
+        // ^^^ 修改 ^^^
+
         // 构造函数
         ClientSession() :
             intervalReceivedPackets(0),
@@ -95,6 +122,7 @@ private:
             frameRate(30), // 给一个默认值, 以防协商失败
             playedFrames(0),
             stutterEvents(0),
+            
 
             // ▼▼▼ 【新增】初始化新增的成员变量 ▼▼▼
             logIntervalSumThroughput(0.0),
@@ -123,6 +151,7 @@ private:
     void ScheduleLog(const Address& clientAddress);
     void LogPlaybackStats(const Address& clientAddress);
 
+    uint32_t m_cameraId;    // 摄像头的唯一ID
 
     Ptr<Socket> m_socket;      // 服务器的Socket
     uint16_t m_port;           // 监听的端口
@@ -135,6 +164,11 @@ private:
     std::string m_logFileName;
     std::ofstream m_logFile;
     Time m_logInterval;
+
+    // VVV 新增: 客户端信息注册表 VVV
+    // 将每个客户端的IP地址映射到其完整的元数据
+    std::map<Ipv4Address, ClientInfo> m_clientInfoRegistry;
+    // ^^^ 新增 ^^^
 };
 
 } // namespace ns3
