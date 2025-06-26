@@ -13,6 +13,7 @@
 #include "ns3/boolean.h" // <<< 新增：包含布尔值头文件
 #include "ns3/string.h"
 #include <sstream>
+#include "yty-bitrate-sampler.h"
 
 namespace ns3 {
 
@@ -37,7 +38,8 @@ TypeId YtyCamera::GetTypeId(void)
         .SetParent<Application>()
         .SetGroupName("Applications")
         .AddConstructor<YtyCamera>()
-        .AddAttribute("Bitrate", "The encoding bitrate in bps.", UintegerValue(1000000), MakeUintegerAccessor(&YtyCamera::m_bitrate), MakeUintegerChecker<uint32_t>())
+        // <<< 移除：Bitrate属性，因为它现在是动态的
+        // .AddAttribute("Bitrate", "The encoding bitrate in bps.", UintegerValue(1000000), MakeUintegerAccessor(&YtyCamera::m_bitrate), MakeUintegerChecker<uint32_t>())
         .AddAttribute("FrameRate", "The encoding frame rate in fps.", UintegerValue(30), MakeUintegerAccessor(&YtyCamera::m_frameRate), MakeUintegerChecker<uint32_t>())
         .AddAttribute("PacketSize", "The size of packets sent.", UintegerValue(1400), MakeUintegerAccessor(&YtyCamera::m_packetSize), MakeUintegerChecker<uint32_t>())
         .AddAttribute("RemoteAddress", "The destination address of the outbound packets", AddressValue(), MakeAddressAccessor(&YtyCamera::m_peerAddress), MakeAddressChecker())
@@ -50,7 +52,7 @@ TypeId YtyCamera::GetTypeId(void)
 
 YtyCamera::YtyCamera()
     : m_socket(0),
-      m_bitrate(1000000),
+    //   m_bitrate(1000000),
       m_frameRate(30),
       m_packetSize(1400),
       m_running(false),
@@ -60,7 +62,8 @@ YtyCamera::YtyCamera()
       m_delay(Seconds(0.0)),
       m_lossRate(0.0),
       m_logFileName("camera_stats.txt"),
-      m_logEnabled(false) // <<< 新增：默认启用日志
+      m_logEnabled(false), // <<< 新增：默认启用日志
+      m_bitrateSampler(nullptr) // <<< 新增：初始化采样器指针
 {
     NS_LOG_FUNCTION(this);
 }
@@ -76,6 +79,13 @@ void YtyCamera::SetRemote(Address ip, uint16_t port)
     NS_LOG_FUNCTION(this << ip << port);
     m_peerAddress = ip;
     m_peerPort = port;
+}
+
+// <<< 新增：实现设置采样器的方法
+void YtyCamera::SetBitrateSampler(Ptr<BitrateSampler> sampler)
+{
+    NS_LOG_FUNCTION(this << sampler);
+    m_bitrateSampler = sampler;
 }
 
 void YtyCamera::DoDispose(void)
@@ -111,10 +121,11 @@ void YtyCamera::StartApplication(void)
     }
     m_socket->SetRecvCallback(MakeCallback(&YtyCamera::HandleRead, this));
 
-    uint32_t frameSizeInBits = m_bitrate / m_frameRate;
-    uint32_t numPacketsInFrame = (frameSizeInBits / 8 + m_packetSize - 1) / m_packetSize;
-    uint32_t actualBitrate = numPacketsInFrame * m_packetSize * 8 * m_frameRate;
-    m_sendRate = DataRate(actualBitrate);
+    // 码率采样所做的修改
+    // uint32_t frameSizeInBits = m_bitrate / m_frameRate;
+    // uint32_t numPacketsInFrame = (frameSizeInBits / 8 + m_packetSize - 1) / m_packetSize;
+    // uint32_t actualBitrate = numPacketsInFrame * m_packetSize * 8 * m_frameRate;
+    // m_sendRate = DataRate(actualBitrate);
     
     SendRtspRequest("PLAY");
 
@@ -155,7 +166,22 @@ void YtyCamera::Encoder(void)
     NS_LOG_FUNCTION(this);
     if (!m_running) return;
 
-    uint32_t frameSize = m_bitrate / m_frameRate;
+    // uint32_t frameSize = m_bitrate / m_frameRate;
+
+    // <<< 关键修改：现在，该函数在编码每一帧视频之前，都会通过 m_bitrateSampler->Sample() 方法获取一个新的、动态的码率值。 >>>
+    uint32_t currentBitrate = 0;
+    if (m_bitrateSampler)
+    {
+        currentBitrate = m_bitrateSampler->Sample();
+    } else {
+        NS_LOG_WARN("Bitrate sampler not set for camera node " << GetNode()->GetId() << ". Using 0 bps.");
+    }
+    NS_LOG_INFO("Node " << GetNode()->GetId() << " sampled new bitrate: " << currentBitrate << " bps");
+
+    // 根据新码率计算帧大小和包数量
+    uint32_t frameSize = currentBitrate / m_frameRate;
+
+
     uint32_t numPacketsInFrame = (frameSize / 8 + m_packetSize - 1) / m_packetSize;
 
     for (uint32_t i = 0; i < numPacketsInFrame; ++i)
@@ -178,6 +204,11 @@ void YtyCamera::Encoder(void)
 
     m_frameSeqCounter++;
 
+    // 更新发送速率，以便 ScheduleTx 使用
+    uint32_t actualBitrate = numPacketsInFrame * m_packetSize * 8 * m_frameRate;
+    m_sendRate = DataRate(actualBitrate);
+
+    // 安排下一次编码事件
     Time nextEncodeTime = Seconds(1.0 / m_frameRate);
     m_encoderEvent = Simulator::Schedule(nextEncodeTime, &YtyCamera::Encoder, this);
 }
@@ -187,6 +218,13 @@ void YtyCamera::ScheduleTx(void)
 {
     if (m_running)
     {
+
+        if (m_sendRate == DataRate(0)) {
+            // 如果速率为0（比如码率采样为0），则不需要频繁调度发送
+            // 可以在Encoder中重新启动它
+        return;
+        }
+
         Time txInterval = m_sendRate.CalculateBytesTxTime(m_packetSize);
         m_sendEvent = Simulator::Schedule(txInterval, &YtyCamera::SendPacket, this);
     }

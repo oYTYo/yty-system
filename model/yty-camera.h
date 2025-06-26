@@ -13,7 +13,16 @@
 #include <queue>
 #include <fstream>
 
+#include "ns3/data-rate.h"
+
 namespace ns3 {
+
+/**
+ * @brief 前向声明 BitrateSampler 类
+ * 这可以在编译期间，当完整的类定义还未被解析时，提前告知编译器该类的存在，
+ * 以解决循环依赖和编译顺序问题。
+ */
+class BitrateSampler;
 
 class Socket;
 class Packet;
@@ -72,6 +81,12 @@ public:
 
     void SetRemote(Address ip, uint16_t port);
 
+    /**
+    * @brief 设置码率采样器
+    * @param sampler 指向码率采样器实例的智能指针
+    */
+    void SetBitrateSampler(Ptr<BitrateSampler> sampler); // <<< 新增：设置采样器的方法
+
 protected:
     virtual void DoDispose(void);
 
@@ -92,7 +107,7 @@ private:
     Address m_peerAddress;
     uint16_t m_peerPort;
 
-    uint32_t m_bitrate;
+    // uint32_t m_bitrate;
     uint32_t m_frameRate;
     uint32_t m_packetSize;
     DataRate m_sendRate;
@@ -113,6 +128,8 @@ private:
     std::string m_logFileName;
     std::ofstream m_logFile;
     bool m_logEnabled; // <<< 新增：日志启用/禁用开关
+
+    Ptr<BitrateSampler> m_bitrateSampler; // <<< 新增了一个指向 BitrateSampler 对象的智能指针 Ptr<BitrateSampler> m_bitrateSampler，让每个摄像头实例都可以持有一个采样器。
 };
 
 } // namespace ns3

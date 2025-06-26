@@ -8,6 +8,7 @@ set(SOURCE_FILES
   helper/yty-server-helper.cc
   model/yty-camera.cc
   model/yty-server.cc
+  model/yty-bitrate-sampler.cc # <<< 新增
 )
 
 # 把所有 .h 头文件列出来，赋值给 HEADER_FILES 变量。
@@ -16,6 +17,7 @@ set(HEADER_FILES
   helper/yty-server-helper.h
   model/yty-camera.h
   model/yty-server.h
+  model/yty-bitrate-sampler.h # <<< 新增
 )
 
 # build_lib 是 ns-3 的自定义 CMake 宏，用于声明并构建一个模块静态/动态库。
