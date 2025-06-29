@@ -65,7 +65,8 @@ YtyCamera::YtyCamera()
       m_logEnabled(false), // <<< 新增：默认启用日志
       m_bitrateSampler(nullptr), // <<< 新增：初始化采样器指针
       // 摄像头ID
-      m_cameraId(0)
+      m_cameraId(0),
+      m_sessionActive(false) // <<< 新增: 初始化会话状态为未激活
 {
     NS_LOG_FUNCTION(this);
 }
@@ -129,7 +130,8 @@ void YtyCamera::StartApplication(void)
     // uint32_t actualBitrate = numPacketsInFrame * m_packetSize * 8 * m_frameRate;
     // m_sendRate = DataRate(actualBitrate);
     
-    SendRtspRequest("PLAY");
+    // SendRtspRequest("PLAY");
+    SendPlayRequestAndScheduleRetry(); // <<< 新增: 调用新的带重试逻辑的函数
 
     m_encoderEvent = Simulator::ScheduleNow(&YtyCamera::Encoder, this);
     m_sendEvent = Simulator::ScheduleNow(&YtyCamera::SendPacket, this);
@@ -148,6 +150,11 @@ void YtyCamera::StopApplication(void)
     }
 
     SendRtspRequest("TEARDOWN");
+
+    if (m_rtspRetryEvent.IsPending()) // <<< 新增
+    {
+        Simulator::Cancel(m_rtspRetryEvent);
+    }
 
     if (m_sendEvent.IsPending())
     {
@@ -178,7 +185,8 @@ void YtyCamera::Encoder(void)
     } else {
         NS_LOG_WARN("Bitrate sampler not set for camera node " << GetNode()->GetId() << ". Using 0 bps.");
     }
-    NS_LOG_INFO("Node " << GetNode()->GetId() << " sampled new bitrate: " << currentBitrate << " bps");
+    // 打印每次码率采样事件
+    // NS_LOG_INFO("Node " << GetNode()->GetId() << " sampled new bitrate: " << currentBitrate << " bps");
 
     // 根据新码率计算帧大小和包数量
     uint32_t frameSize = currentBitrate / m_frameRate;
@@ -202,7 +210,8 @@ void YtyCamera::Encoder(void)
         packet->AddHeader(rtpHeader);
         m_sendBuffer.push(packet);
     }
-    NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera encoded frame " << m_frameSeqCounter << " with " << numPacketsInFrame << " packets.");
+    // 打印摄像头的编码信息
+    // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera encoded frame " << m_frameSeqCounter << " with " << numPacketsInFrame << " packets.");
 
     m_frameSeqCounter++;
 
@@ -242,7 +251,8 @@ void YtyCamera::SendPacket(void)
         Ptr<Packet> packet = m_sendBuffer.front();
         m_sendBuffer.pop();
         SendRtpPacket(packet);
-        NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera sent a packet of size " << packet->GetSize() << " bytes.");
+        // 打印摄像头发送数据包的日志
+        // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera sent a packet of size " << packet->GetSize() << " bytes.");
     }
 
     ScheduleTx();
@@ -307,6 +317,16 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
                         << " bps, Delay=" << m_delay.GetMilliSeconds() 
                         << " ms, Loss Rate=" << m_lossRate);
 
+            // <<< 新增: 会话激活逻辑 >>>
+            if (!m_sessionActive)
+            {
+                NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() 
+                            << "s, Camera " << m_cameraId << " session is now active. Stopping PLAY retries.");
+                m_sessionActive = true;
+                Simulator::Cancel(m_rtspRetryEvent); // 取消下一次的PLAY重试
+            }
+            // <<< 新增结束 >>>
+
             WriteStatsToFile();
             PathDecision();
         }
@@ -328,6 +348,20 @@ void YtyCamera::WriteStatsToFile()
                   << m_delay.GetMilliSeconds() << "\t"
                   << m_lossRate << std::endl;
     }
+}
+
+// 在 yty-camera.cc 文件中新增这个方法的实现
+void YtyCamera::SendPlayRequestAndScheduleRetry()
+{
+    if (!m_running || m_sessionActive)
+    {
+        return; // 如果仿真停止或会话已激活，则停止重试
+    }
+
+    SendRtspRequest("PLAY"); // 发送PLAY请求
+    
+    // 安排1秒后再次尝试
+    m_rtspRetryEvent = Simulator::Schedule(Seconds(1.0), &YtyCamera::SendPlayRequestAndScheduleRetry, this);
 }
 
 } // namespace ns3

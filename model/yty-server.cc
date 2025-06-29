@@ -15,6 +15,7 @@
 #include "ns3/string.h"
 #include <fstream>
 #include <string>
+#include <cmath> // 包含 cmath 以使用 std::abs
 
 
 namespace ns3 {
@@ -84,13 +85,13 @@ void YtyServer::StartApplication(void)
     }
     m_socket->SetRecvCallback(MakeCallback(&YtyServer::HandleRead, this));
 
-    // ▼▼▼ 【修改】打开日志文件并写入新的表头 ▼▼▼
+    // ▼▼▼ 【修改】在日志表头中加入 "Jitter(ms)" ▼▼▼
     m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
     if (m_logFile.is_open())
     {
-        m_logFile << "Time(s)\tClientAddr\tThroughput(bps)\tDelay(ms)\tLossRate\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion" << std::endl;
+        m_logFile << "Time(s)\tClientAddr\tThroughput(bps)\tDelay(ms)\tLossRate\tJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion" << std::endl;
     }
-    // ▲▲▲ 【修改】打开日志文件并写入新的表头 ▲▲▲
+    // ▲▲▲ 【修改】在日志表头中加入 "Jitter(ms)" ▲▲▲
 }
 
 void YtyServer::StopApplication(void)
@@ -165,13 +166,29 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
         session.maxSeenSentPackets = cumulativeSentCount;
     }
 
+    // --- VVV 新增：抖动计算逻辑 (基于 RFC 3550) VVV ---
+    if (!session.lastArrivalTime.IsZero()) {
+        Time transit = now - sentTime;
+        Time lastTransit = session.lastArrivalTime - session.lastSentTime;
+        
+        int64_t diff_ns = std::abs(transit.GetNanoSeconds() - lastTransit.GetNanoSeconds());
+        double diff_s = diff_ns / 1e9; // 转换为秒
+
+        // 使用平滑算法更新抖动: J = J + (|D| - J) / 16
+        session.jitter += (diff_s - session.jitter) / 16.0;
+    }
+    session.lastSentTime = sentTime;
+    session.lastArrivalTime = now;
+    // --- ^^^ 新增 ^^^ ---
+
     // --- 新的抖动缓冲逻辑 ---
     uint32_t frameSeq = rtpHeader.GetFrameSeq();
     uint32_t packetSeq = rtpHeader.GetPacketSeq();
 
     // 将数据包存入抖动缓冲区
     session.buffer[frameSeq][packetSeq] = {packet, now};
-    NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server buffered packet for frame " << frameSeq << ", packet " << packetSeq);
+    // 打印服务器缓冲区日志
+    // NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server buffered packet for frame " << frameSeq << ", packet " << packetSeq);
 
     // 如果这就是我们当前正在等待的帧，立即尝试播放它
     if(frameSeq == session.nextFrameToPlay)
@@ -301,13 +318,21 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4()
                 << ": IntervalThroughput=" << throughput << " bps, IntervalAvgDelay=" << avgDelay.GetMilliSeconds() << " ms, IntervalLossRate=" << lossRate);
 
+    // ▼▼▼ 【新增】为日志记录累加抖动值 ▼▼▼
+    session.logIntervalSumThroughput += throughput;
+    session.logIntervalSumDelay += avgDelay;
+    session.logIntervalSumLossRate += lossRate;
+    session.logIntervalSumJitter += session.jitter; // 累加当前计算的抖动值
+    session.logIntervalRtcpCount++;
+    // ▲▲▲ 【新增】为日志记录累加抖动值 ▲▲▲
+
 
     // ▼▼▼ 添加调试日志 ▼▼▼
-    NS_LOG_INFO("--- DEBUG --- "
-                << "Time: " << now.GetSeconds() << "s, "
-                << "Client: " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << ", "
-                << "TotalDelay before reset: " << session.intervalTotalDelay.GetMilliSeconds() << "ms, "
-                << "Packets in interval: " << session.intervalReceivedPackets);
+    // NS_LOG_INFO("--- DEBUG --- "
+    //             << "Time: " << now.GetSeconds() << "s, "
+    //             << "Client: " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << ", "
+    //             << "TotalDelay before reset: " << session.intervalTotalDelay.GetMilliSeconds() << "ms, "
+    //             << "Packets in interval: " << session.intervalReceivedPackets);
     // ▲▲▲ 添加调试日志 ▲▲▲
 
     // ▼▼▼ 【新增】为日志记录累加RTCP统计信息 ▼▼▼
@@ -432,47 +457,50 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         stutterRate = static_cast<double>(session.stutterEvents) / (session.playedFrames + session.stutterEvents);
     }
 
-    // ▼▼▼ 【新增】计算网络指标的平均值 ▼▼▼
+    // ▼▼▼ 【新增】计算包括抖动在内的各项指标平均值 ▼▼▼
     double avgThroughput = 0.0;
     double avgDelayMs = 0.0;
     double avgLossRate = 0.0;
+    double avgJitterMs = 0.0; // 抖动平均值，单位毫秒
 
     if (session.logIntervalRtcpCount > 0)
     {
         avgThroughput = session.logIntervalSumThroughput / session.logIntervalRtcpCount;
         avgDelayMs = (session.logIntervalSumDelay.GetMilliSeconds()) / session.logIntervalRtcpCount;
         avgLossRate = session.logIntervalSumLossRate / session.logIntervalRtcpCount;
+        avgJitterMs = (session.logIntervalSumJitter / session.logIntervalRtcpCount) * 1000.0; // 转换为毫秒
     }
-    // ▲▲▲ 【新增】计算网络指标的平均值 ▲▲▲
+    // ▲▲▲ 【新增】计算包括抖动在内的各项指标平均值 ▲▲▲
 
-    // --- 写入日志文件 ---
+    // ▼▼▼ 【修改】将抖动值写入日志文件 ▼▼▼
     if (m_logFile.is_open())
     {
-        // VVV 修改: 从 session.clientInfo 获取数据并写入日志 VVV
         m_logFile << Simulator::Now().GetSeconds() << "\t"
                   << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << "\t"
                   << avgThroughput << "\t"
                   << avgDelayMs << "\t"
                   << avgLossRate << "\t"
+                  << avgJitterMs << "\t" // 在丢包率后插入抖动值
                   << session.playedFrames << "\t"
                   << session.stutterEvents << "\t"
                   << stutterRate << "\t"
                   << session.clientInfo.cameraId << "\t"
                   << session.clientInfo.accessType << "\t"
                   << session.clientInfo.region << std::endl;
-        // ^^^ 修改 ^^^
     }
+    // ▲▲▲ 【修改】将抖动值写入日志文件 ▲▲▲
     
     // --- 为下一个统计周期重置所有日志相关的统计量 ---
     session.playedFrames = 0;
     session.stutterEvents = 0;
 
-    // ▼▼▼ 【新增】重置网络指标累加器 ▼▼▼
+    // ▼▼▼ 【新增】重置所有日志相关的统计量，包括抖动 ▼▼▼
     session.logIntervalSumThroughput = 0.0;
     session.logIntervalSumDelay = Seconds(0);
     session.logIntervalSumLossRate = 0.0;
+    session.logIntervalSumJitter = 0.0; // 重置抖动累加器
     session.logIntervalRtcpCount = 0;
-    // ▲▲▲ 【新增】重置网络指标累加器 ▼▼▲
+    // ▲▲▲ 【新增】重置所有日志相关的统计量，包括抖动 ▲▲▲
 
     // 安排下一次日志事件
     ScheduleLog(clientAddress);

@@ -99,12 +99,22 @@ private:
         uint32_t stutterEvents;         // 当前1秒周期内的总卡顿次数
         EventId  logStatsEvent;         // 触发日志记录的事件
 
+        // --- VVV 新增：用于抖动计算的状态变量 VVV ---
+        Time     lastArrivalTime;       // 上一个RTP包的到达时间
+        Time     lastSentTime;          // 上一个RTP包的发送时间
+        double   jitter;                // 计算出的抖动值 (单位: 秒)
+        // --- ^^^ 新增 ^^^ ---
+
         // ▼▼▼ 【新增】用于日志记录的RTCP指标累加器 ▼▼▼
         double   logIntervalSumThroughput; // 日志周期内，吞吐率的总和
         Time     logIntervalSumDelay;      // 日志周期内，延迟的总和
         double   logIntervalSumLossRate;   // 日志周期内，丢包率的总和
         uint32_t logIntervalRtcpCount;     // 日志周期内，收到的RTCP包数量
         // ▲▲▲ 【新增】用于日志记录的RTCP指标累加器 ▲▲▲
+
+        // --- VVV 新增：用于抖动日志的累加器 VVV ---
+        double   logIntervalSumJitter;      // 日志周期内，抖动的总和
+        // --- ^^^ 新增 ^^^ ---
 
         // VVV 修改: 直接包含一个ClientInfo结构体 VVV
         ClientInfo clientInfo;
@@ -122,14 +132,23 @@ private:
             frameRate(30), // 给一个默认值, 以防协商失败
             playedFrames(0),
             stutterEvents(0),
+            // --- VVV 新增：初始化新增的抖动相关成员变量 VVV ---
+            lastArrivalTime(Seconds(0)),
+            lastSentTime(Seconds(0)),
+            jitter(0.0),
+            // --- ^^^ 新增 ^^^ ---
             
 
             // ▼▼▼ 【新增】初始化新增的成员变量 ▼▼▼
             logIntervalSumThroughput(0.0),
             logIntervalSumDelay(Seconds(0)),
             logIntervalSumLossRate(0.0),
-            logIntervalRtcpCount(0)
+            logIntervalRtcpCount(0),
             // ▲▲▲ 【新增】初始化新增的成员变量 ▲▲▲
+
+            // --- VVV 新增：初始化抖动累加器 VVV ---
+            logIntervalSumJitter(0.0)
+            // --- ^^^ 新增 ^^^ ---
             
         {
         }

@@ -133,6 +133,11 @@ private:
 
     uint32_t m_cameraId; // 摄像头的唯一ID
 
+
+    void SendPlayRequestAndScheduleRetry(); // 新增一个方法声明
+    bool m_sessionActive;      // <<< 新增: 标记会话是否已激活
+    EventId m_rtspRetryEvent;  // <<< 新增: 用于RTSP PLAY重试的事件
+
 };
 
 } // namespace ns3
