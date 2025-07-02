@@ -46,7 +46,8 @@ TypeId YtyCamera::GetTypeId(void)
         .AddAttribute("RemotePort", "The destination port of the outbound packets", UintegerValue(9), MakeUintegerAccessor(&YtyCamera::m_peerPort), MakeUintegerChecker<uint16_t>())
         .AddAttribute("LogFile", "File to log statistics.", StringValue("scratch/camera_stats.txt"), MakeStringAccessor(&YtyCamera::m_logFileName), MakeStringChecker())
         .AddAttribute("CameraId", "此摄像头的唯一ID.", UintegerValue(0), MakeUintegerAccessor(&YtyCamera::m_cameraId), MakeUintegerChecker<uint32_t>())
-        .AddAttribute("EnableLog", "Enable or disable logging.", BooleanValue(true), MakeBooleanAccessor(&YtyCamera::m_logEnabled), MakeBooleanChecker());
+        .AddAttribute("EnableLog", "Enable or disable logging.", BooleanValue(true), MakeBooleanAccessor(&YtyCamera::m_logEnabled), MakeBooleanChecker())
+        .AddAttribute("Codec", "The video codec (e.g., H.264, H.265).", StringValue("H.264"), MakeStringAccessor(&YtyCamera::m_codec), MakeStringChecker()); // <<< 【新增】Codec属性
     return tid;
 }
 
@@ -66,7 +67,8 @@ YtyCamera::YtyCamera()
       m_bitrateSampler(nullptr), // <<< 新增：初始化采样器指针
       // 摄像头ID
       m_cameraId(0),
-      m_sessionActive(false) // <<< 新增: 初始化会话状态为未激活
+      m_sessionActive(false), // <<< 新增: 初始化会话状态为未激活
+      m_decayFactor(1.0) // +++ 新增: 初始化衰减因子为1.0 (即不衰减) +++
 {
     NS_LOG_FUNCTION(this);
 }
@@ -188,8 +190,20 @@ void YtyCamera::Encoder(void)
     // 打印每次码率采样事件
     // NS_LOG_INFO("Node " << GetNode()->GetId() << " sampled new bitrate: " << currentBitrate << " bps");
 
-    // 根据新码率计算帧大小和包数量
-    uint32_t frameSize = currentBitrate / m_frameRate;
+    // +++ 新增代码段开始：应用衰减因子并强制执行最低码率 +++
+    const uint32_t MINIMUM_BITRATE = 400000; // 设置400 kbps的兜底码率
+    uint32_t adjustedBitrate = static_cast<uint32_t>(currentBitrate * m_decayFactor);
+    adjustedBitrate = std::max(MINIMUM_BITRATE, adjustedBitrate);
+
+    // 记录码率调整事件
+    // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera " << m_cameraId
+    //             << " adjusted bitrate: Sampled=" << currentBitrate
+    //             << "bps, Factor=" << m_decayFactor
+    //             << ", Final=" << adjustedBitrate << "bps");
+    // +++ 新增代码段结束 +++
+
+    // --- 修改：使用'adjustedBitrate'替代'currentBitrate' ---
+    uint32_t frameSize = adjustedBitrate / m_frameRate;
 
 
     uint32_t numPacketsInFrame = (frameSize / 8 + m_packetSize - 1) / m_packetSize;
@@ -272,7 +286,8 @@ void YtyCamera::SendRtspRequest(std::string method)
         msg << "PLAY rtsp://server/video RTSP/1.0\r\n"
             << "CSeq: 1\r\n"
             << "X-Frame-Rate: " << m_frameRate << "\r\n"
-            << "X-Camera-ID: " << m_cameraId << "\r\n\r\n";
+            << "X-Camera-ID: " << m_cameraId << "\r\n\r\n"
+            << "X-Codec: " << m_codec << "\r\n\r\n"; // <<< 【新增】在PLAY请求中携带Codec信息
     }
     else
     {
@@ -293,7 +308,9 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
     Address from;
     while ((packet = socket->RecvFrom(from)))
     {
-        uint32_t expectedSize = sizeof(double) + sizeof(int64_t) + sizeof(double);
+        // --- 修改代码段开始：调整期望大小并解析decayFactor ---
+        // 期望的大小现在包含额外的double
+        uint32_t expectedSize = sizeof(double) + sizeof(int64_t) + sizeof(double) + sizeof(double);
         if (packet->GetSize() >= expectedSize)
         {
             uint8_t* buffer = new uint8_t[expectedSize];
@@ -309,13 +326,19 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
             offset += sizeof(int64_t);
 
             m_lossRate = *(reinterpret_cast<double*>(buffer + offset));
+            offset += sizeof(double);
+
+            m_decayFactor = *(reinterpret_cast<double*>(buffer + offset)); // 读取衰减因子
             
             delete[] buffer;
-
+            
+            // 在日志中记录新因子
             NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() 
                         << "s, Camera received RTCP feedback: Throughput=" << m_throughput 
                         << " bps, Delay=" << m_delay.GetMilliSeconds() 
-                        << " ms, Loss Rate=" << m_lossRate);
+                        << " ms, Loss Rate=" << m_lossRate
+                        << ", DecayFactor=" << m_decayFactor);
+            // --- 修改代码段结束 ---
 
             // <<< 新增: 会话激活逻辑 >>>
             if (!m_sessionActive)

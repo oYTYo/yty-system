@@ -85,13 +85,13 @@ void YtyServer::StartApplication(void)
     }
     m_socket->SetRecvCallback(MakeCallback(&YtyServer::HandleRead, this));
 
-    // ▼▼▼ 【修改】在日志表头中加入 "Jitter(ms)" ▼▼▼
     m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
     if (m_logFile.is_open())
     {
-        m_logFile << "Time(s)\tClientAddr\tThroughput(bps)\tDelay(ms)\tLossRate\tJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion" << std::endl;
+        // <<< 【修改】在日志表头中加入 "Codec"
+        m_logFile << "Time(s)\tClientAddr\tThroughput(bps)\tDelay(ms)\tLossRate\tJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion\tCodec" << std::endl;
     }
-    // ▲▲▲ 【修改】在日志表头中加入 "Jitter(ms)" ▲▲▲
+    
 }
 
 void YtyServer::StopApplication(void)
@@ -238,6 +238,14 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
                     uint32_t negotiatedRate = std::stoul(rate_str);
                     m_sessions[from].frameRate = negotiatedRate;
                     NS_LOG_INFO("Negotiated frame rate with " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ": " << negotiatedRate << " fps");
+
+                    // ▼▼▼ 【核心修改】在这里计算并存储超时时长 ▼▼▼
+                    if (negotiatedRate > 0) {
+                        // 使用1.5倍帧间隔作为超时，增加网络抖动容忍度
+                        m_sessions[from].stutterTimeout = MilliSeconds(1200 / negotiatedRate);
+                    }
+                    // ▲▲▲ 【核心修改】▲▲▲
+                    
                 } catch (const std::exception& e) {
                     NS_LOG_WARN("Failed to parse frame rate from request. Using default: " << m_sessions[from].frameRate);
                 }
@@ -245,6 +253,22 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
             else
             {
                 NS_LOG_INFO("No frame rate header found. Using default: " << m_sessions[from].frameRate);
+            }
+            // --- 解析结束 ---
+
+            // --- 【新增】解析Codec ---
+            std::string codec_header_key = "X-Codec: ";
+            size_t codec_pos = request.find(codec_header_key);
+            if (codec_pos != std::string::npos)
+            {
+                size_t end_pos = request.find("\r\n", codec_pos);
+                m_sessions[from].clientInfo.codec = request.substr(codec_pos + codec_header_key.length(), end_pos - (codec_pos + codec_header_key.length()));
+                NS_LOG_INFO("Negotiated codec with " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ": " << m_sessions[from].clientInfo.codec);
+            }
+            else
+            {
+                // 如果请求中没有codec信息，则使用注册时提供的信息
+                NS_LOG_INFO("No codec header found. Using registered codec: " << m_sessions[from].clientInfo.codec);
             }
             // --- 解析结束 ---
 
@@ -301,8 +325,49 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     }
     if (lossRate < 0) lossRate = 0.0;
 
-    // Create and send RTCP packet
-    uint32_t payloadSize = sizeof(double) + sizeof(int64_t) + sizeof(double);
+
+    // +++ 新增代码段开始：自适应码率衰减因子计算 +++
+    // 基于您提供的统计数据：
+    // 平均延迟: ~36ms, 标准差: ~60ms
+    // 平均丢包: ~1.7%, 标准差: ~5.7%
+    // 平均抖动: ~3ms, 标准差: ~0.6ms
+
+    // int penaltyPoints = 0;
+    // double currentJitterMs = session.jitter * 1000.0; // 将抖动单位转换为毫秒
+
+    // // 1. 评估延迟
+    // if (avgDelay.GetMilliSeconds() > 150.0) penaltyPoints += 4; // 非常差
+    // else if (avgDelay.GetMilliSeconds() > 100.0) penaltyPoints += 2; // 差
+    // else if (avgDelay.GetMilliSeconds() > 50.0) penaltyPoints += 1;  // 警告
+
+    // // 2. 评估丢包率
+    // if (lossRate > 0.1) penaltyPoints += 4;      // 非常差 (>10%)
+    // else if (lossRate > 0.05) penaltyPoints += 2; // 差 (>5%)
+    // else if (lossRate > 0.02) penaltyPoints += 1; // 警告 (>2%)
+
+    // // 3. 评估抖动
+    // if (currentJitterMs > 20.0) penaltyPoints += 2; // 差
+    // else if (currentJitterMs > 10.0) penaltyPoints += 1; // 警告
+
+    // 4. 将惩罚点数映射到衰减因子
+    double decayFactor = 1.0;
+    // if (penaltyPoints >= 9) decayFactor = 0.1;
+    // else if (penaltyPoints == 8) decayFactor = 0.6;
+    // else if (penaltyPoints == 7) decayFactor = 0.65;
+    // else if (penaltyPoints == 6) decayFactor = 0.7;
+    // else if (penaltyPoints == 5) decayFactor = 0.75;
+    // else if (penaltyPoints == 4) decayFactor = 0.8;
+    // else if (penaltyPoints == 3) decayFactor = 0.85;
+    // else if (penaltyPoints == 2) decayFactor = 0.9;
+    // else if (penaltyPoints == 1) decayFactor = 0.95;
+
+    // +++ 新增代码段结束 +++
+
+
+    // 创建并发送RTCP包
+    // --- 修改代码段开始：将 decayFactor 加入RTCP负载 ---
+    // 为decayFactor增加了一个double的空间
+    uint32_t payloadSize = sizeof(double) + sizeof(int64_t) + sizeof(double) + sizeof(double); 
     uint8_t* buffer = new uint8_t[payloadSize];
     uint32_t offset = 0;
     memcpy(buffer + offset, &throughput, sizeof(double));
@@ -311,12 +376,17 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     memcpy(buffer + offset, &delay_ns, sizeof(int64_t));
     offset += sizeof(int64_t);
     memcpy(buffer + offset, &lossRate, sizeof(double));
+    offset += sizeof(double);
+    memcpy(buffer + offset, &decayFactor, sizeof(double)); // 将decayFactor加入缓冲区
     Ptr<Packet> rtcpPacket = Create<Packet>(buffer, payloadSize);
     delete[] buffer;
+    // --- 修改代码段结束 ---
     m_socket->SendTo(rtcpPacket, 0, clientAddress);
 
+    // 在日志中增加对新因子的记录
     NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4()
-                << ": IntervalThroughput=" << throughput << " bps, IntervalAvgDelay=" << avgDelay.GetMilliSeconds() << " ms, IntervalLossRate=" << lossRate);
+            << ": IntervalThroughput=" << throughput << " bps, IntervalAvgDelay=" << avgDelay.GetMilliSeconds() << " ms, IntervalLossRate=" << lossRate
+            << ", DecayFactor=" << decayFactor);
 
     // ▼▼▼ 【新增】为日志记录累加抖动值 ▼▼▼
     session.logIntervalSumThroughput += throughput;
@@ -380,7 +450,7 @@ void YtyServer::TryPlayback(const Address& clientAddress)
     {
         // 帧完全不存在。安排一个卡顿超时。
         if (!session.stutterTimeoutEvent.IsPending()) {
-             session.stutterTimeoutEvent = Simulator::Schedule(MilliSeconds(50), &YtyServer::HandleStutter, this, clientAddress);
+             session.stutterTimeoutEvent = Simulator::Schedule(session.stutterTimeout, &YtyServer::HandleStutter, this, clientAddress);
         }
         return; // 等待数据包或卡顿超时
     }
@@ -415,7 +485,7 @@ void YtyServer::TryPlayback(const Address& clientAddress)
     {
         // 帧已开始到达但尚不完整。如果卡顿计时器还未运行，则启动它。
         if (!session.stutterTimeoutEvent.IsPending()) {
-             session.stutterTimeoutEvent = Simulator::Schedule(MilliSeconds(50), &YtyServer::HandleStutter, this, clientAddress);
+             session.stutterTimeoutEvent = Simulator::Schedule(session.stutterTimeout, &YtyServer::HandleStutter, this, clientAddress);
         }
     }
 }
@@ -486,7 +556,8 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
                   << stutterRate << "\t"
                   << session.clientInfo.cameraId << "\t"
                   << session.clientInfo.accessType << "\t"
-                  << session.clientInfo.region << std::endl;
+                  << session.clientInfo.region << "\t"
+                  << session.clientInfo.codec << std::endl; // <<< 【修改】写入Codec信息
     }
     // ▲▲▲ 【修改】将抖动值写入日志文件 ▲▲▲
     

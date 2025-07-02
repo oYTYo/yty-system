@@ -41,10 +41,11 @@ public:
         uint32_t    cameraId;
         std::string accessType;
         std::string region;
+        std::string codec; // <<< 【新增】存储编码格式
 
-        ClientInfo() : cameraId(0), accessType("Unknown"), region("Unknown") {}
-        ClientInfo(uint32_t id, std::string type, std::string reg) 
-            : cameraId(id), accessType(type), region(reg) {}
+        ClientInfo() : cameraId(0), accessType("Unknown"), region("Unknown"), codec("Unknown") {} // <<< 【修改】构造函数初始化
+        ClientInfo(uint32_t id, std::string type, std::string reg, std::string c) // <<< 【修改】构造函数
+        : cameraId(id), accessType(type), region(reg), codec(c) {}
     };
 
     /**
@@ -92,6 +93,7 @@ private:
         uint32_t nextFrameToPlay;       // 我们期望播放的下一帧的序号
         EventId  playbackEvent;         // 触发下一次播放尝试的事件
         EventId  stutterTimeoutEvent;   // 处理帧未按时到达的事件
+        Time     stutterTimeout;        // <<< 新增: 存储为该会话计算的卡顿超时时长
         uint32_t frameRate;             // 用于存储协商后的帧率
 
         // --- 播放日志统计 ---
@@ -129,6 +131,7 @@ private:
             maxSeenSentPackets(0),
             lastReportTime(Seconds(0)),
             nextFrameToPlay(0),
+            stutterTimeout(MilliSeconds(40)), // <<< 新增: 给予一个默认值
             frameRate(30), // 给一个默认值, 以防协商失败
             playedFrames(0),
             stutterEvents(0),
