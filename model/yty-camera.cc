@@ -68,7 +68,8 @@ YtyCamera::YtyCamera()
       // 摄像头ID
       m_cameraId(0),
       m_sessionActive(false), // <<< 新增: 初始化会话状态为未激活
-      m_decayFactor(1.0) // +++ 新增: 初始化衰减因子为1.0 (即不衰减) +++
+    //   m_decayFactor(1.0) // +++ 新增: 初始化衰减因子为1.0 (即不衰减) +++
+      m_targetBitrate(1000000) // <<<【新增】初始化一个默认的目标码率 (1 Mbps)
 {
     NS_LOG_FUNCTION(this);
 }
@@ -172,40 +173,92 @@ void YtyCamera::StopApplication(void)
     }
 }
 
+
+// 原始摄像机编码器
+// void YtyCamera::Encoder(void)
+// {
+//     NS_LOG_FUNCTION(this);
+//     if (!m_running) return;
+
+//     // uint32_t frameSize = m_bitrate / m_frameRate;
+
+//     // <<< 关键修改：现在，该函数在编码每一帧视频之前，都会通过 m_bitrateSampler->Sample() 方法获取一个新的、动态的码率值。 >>>
+//     uint32_t currentBitrate = 0;
+//     if (m_bitrateSampler)
+//     {
+//         currentBitrate = m_bitrateSampler->Sample();
+//     } else {
+//         NS_LOG_WARN("Bitrate sampler not set for camera node " << GetNode()->GetId() << ". Using 0 bps.");
+//     }
+//     // 打印每次码率采样事件
+//     // NS_LOG_INFO("Node " << GetNode()->GetId() << " sampled new bitrate: " << currentBitrate << " bps");
+
+//     // +++ 新增代码段开始：应用衰减因子并强制执行最低码率 +++
+//     const uint32_t MINIMUM_BITRATE = 400000; // 设置400 kbps的兜底码率
+//     uint32_t adjustedBitrate = static_cast<uint32_t>(currentBitrate * m_decayFactor);
+//     adjustedBitrate = std::max(MINIMUM_BITRATE, adjustedBitrate);
+
+//     // 记录码率调整事件
+//     // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera " << m_cameraId
+//     //             << " adjusted bitrate: Sampled=" << currentBitrate
+//     //             << "bps, Factor=" << m_decayFactor
+//     //             << ", Final=" << adjustedBitrate << "bps");
+//     // +++ 新增代码段结束 +++
+
+//     // --- 修改：使用'adjustedBitrate'替代'currentBitrate' ---
+//     uint32_t frameSize = adjustedBitrate / m_frameRate;
+
+
+//     uint32_t numPacketsInFrame = (frameSize / 8 + m_packetSize - 1) / m_packetSize;
+
+//     for (uint32_t i = 0; i < numPacketsInFrame; ++i)
+//     {
+//         Ptr<Packet> packet = Create<Packet>(m_packetSize);
+        
+//         m_cumulativePacketsSent++;
+
+//         RtpHeader rtpHeader;
+//         rtpHeader.SetTimestamp(Simulator::Now().GetNanoSeconds());
+//         rtpHeader.SetFrameSeq(m_frameSeqCounter);
+//         rtpHeader.SetPacketSeq(i);
+//         rtpHeader.SetTotalPackets(m_cumulativePacketsSent);
+//         rtpHeader.SetPacketsInFrame(numPacketsInFrame); 
+        
+//         packet->AddHeader(rtpHeader);
+//         m_sendBuffer.push(packet);
+//     }
+//     // 打印摄像头的编码信息
+//     // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera encoded frame " << m_frameSeqCounter << " with " << numPacketsInFrame << " packets.");
+
+//     m_frameSeqCounter++;
+
+//     // 更新发送速率，以便 ScheduleTx 使用
+//     uint32_t actualBitrate = numPacketsInFrame * m_packetSize * 8 * m_frameRate;
+//     m_sendRate = DataRate(actualBitrate);
+
+//     // 安排下一次编码事件
+//     Time nextEncodeTime = Seconds(1.0 / m_frameRate);
+//     m_encoderEvent = Simulator::Schedule(nextEncodeTime, &YtyCamera::Encoder, this);
+// }
+
+
 void YtyCamera::Encoder(void)
 {
     NS_LOG_FUNCTION(this);
     if (!m_running) return;
 
-    // uint32_t frameSize = m_bitrate / m_frameRate;
-
-    // <<< 关键修改：现在，该函数在编码每一帧视频之前，都会通过 m_bitrateSampler->Sample() 方法获取一个新的、动态的码率值。 >>>
-    uint32_t currentBitrate = 0;
-    if (m_bitrateSampler)
-    {
-        currentBitrate = m_bitrateSampler->Sample();
-    } else {
-        NS_LOG_WARN("Bitrate sampler not set for camera node " << GetNode()->GetId() << ". Using 0 bps.");
+    // ---【核心修改】不再使用BitrateSampler和decayFactor，直接使用m_targetBitrate ---
+    
+    // 如果目标码率为0，则不产生数据包
+    if (m_targetBitrate == 0) {
+        // 安排下一次编码事件，以防码率后续恢复
+        Time nextEncodeTime = Seconds(1.0 / m_frameRate);
+        m_encoderEvent = Simulator::Schedule(nextEncodeTime, &YtyCamera::Encoder, this);
+        return;
     }
-    // 打印每次码率采样事件
-    // NS_LOG_INFO("Node " << GetNode()->GetId() << " sampled new bitrate: " << currentBitrate << " bps");
-
-    // +++ 新增代码段开始：应用衰减因子并强制执行最低码率 +++
-    const uint32_t MINIMUM_BITRATE = 400000; // 设置400 kbps的兜底码率
-    uint32_t adjustedBitrate = static_cast<uint32_t>(currentBitrate * m_decayFactor);
-    adjustedBitrate = std::max(MINIMUM_BITRATE, adjustedBitrate);
-
-    // 记录码率调整事件
-    // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera " << m_cameraId
-    //             << " adjusted bitrate: Sampled=" << currentBitrate
-    //             << "bps, Factor=" << m_decayFactor
-    //             << ", Final=" << adjustedBitrate << "bps");
-    // +++ 新增代码段结束 +++
-
-    // --- 修改：使用'adjustedBitrate'替代'currentBitrate' ---
-    uint32_t frameSize = adjustedBitrate / m_frameRate;
-
-
+    
+    // 使用从服务器获取的目标码率
+    uint32_t frameSize = m_targetBitrate / m_frameRate;
     uint32_t numPacketsInFrame = (frameSize / 8 + m_packetSize - 1) / m_packetSize;
 
     for (uint32_t i = 0; i < numPacketsInFrame; ++i)
@@ -301,6 +354,65 @@ void YtyCamera::SendRtspRequest(std::string method)
     NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera sent RTSP " << method << " request.");
 }
 
+
+// 原始的handleread
+// void YtyCamera::HandleRead(Ptr<Socket> socket)
+// {
+//     NS_LOG_FUNCTION(this << socket);
+//     Ptr<Packet> packet;
+//     Address from;
+//     while ((packet = socket->RecvFrom(from)))
+//     {
+//         // --- 修改代码段开始：调整期望大小并解析decayFactor ---
+//         // 期望的大小现在包含额外的double
+//         uint32_t expectedSize = sizeof(double) + sizeof(int64_t) + sizeof(double) + sizeof(double);
+//         if (packet->GetSize() >= expectedSize)
+//         {
+//             uint8_t* buffer = new uint8_t[expectedSize];
+//             packet->CopyData(buffer, expectedSize);
+            
+//             uint32_t offset = 0;
+
+//             m_throughput = *(reinterpret_cast<double*>(buffer + offset));
+//             offset += sizeof(double);
+
+//             int64_t delay_ns = *(reinterpret_cast<int64_t*>(buffer + offset));
+//             m_delay = NanoSeconds(delay_ns);
+//             offset += sizeof(int64_t);
+
+//             m_lossRate = *(reinterpret_cast<double*>(buffer + offset));
+//             offset += sizeof(double);
+
+//             m_decayFactor = *(reinterpret_cast<double*>(buffer + offset)); // 读取衰减因子
+            
+//             delete[] buffer;
+            
+//             // 在日志中记录新因子
+//             NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() 
+//                         << "s, Camera received RTCP feedback: Throughput=" << m_throughput 
+//                         << " bps, Delay=" << m_delay.GetMilliSeconds() 
+//                         << " ms, Loss Rate=" << m_lossRate
+//                         << ", DecayFactor=" << m_decayFactor);
+//             // --- 修改代码段结束 ---
+
+//             // <<< 新增: 会话激活逻辑 >>>
+//             if (!m_sessionActive)
+//             {
+//                 NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() 
+//                             << "s, Camera " << m_cameraId << " session is now active. Stopping PLAY retries.");
+//                 m_sessionActive = true;
+//                 Simulator::Cancel(m_rtspRetryEvent); // 取消下一次的PLAY重试
+//             }
+//             // <<< 新增结束 >>>
+
+//             WriteStatsToFile();
+//             PathDecision();
+//         }
+//     }
+// }
+
+
+
 void YtyCamera::HandleRead(Ptr<Socket> socket)
 {
     NS_LOG_FUNCTION(this << socket);
@@ -308,53 +420,27 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
     Address from;
     while ((packet = socket->RecvFrom(from)))
     {
-        // --- 修改代码段开始：调整期望大小并解析decayFactor ---
-        // 期望的大小现在包含额外的double
-        uint32_t expectedSize = sizeof(double) + sizeof(int64_t) + sizeof(double) + sizeof(double);
-        if (packet->GetSize() >= expectedSize)
+        // ---【核心修改】解析只包含目标码率的反馈包 ---
+        if (packet->GetSize() == sizeof(uint32_t))
         {
-            uint8_t* buffer = new uint8_t[expectedSize];
-            packet->CopyData(buffer, expectedSize);
+            // 从包中直接读取目标码率
+            // 创建一个uint32_t变量，然后用CopyData将包的内容填入这个变量
+            uint32_t receivedBitrate = 0;
+            packet->CopyData(reinterpret_cast<uint8_t*>(&receivedBitrate), sizeof(uint32_t));
+            m_targetBitrate = receivedBitrate;
             
-            uint32_t offset = 0;
-
-            m_throughput = *(reinterpret_cast<double*>(buffer + offset));
-            offset += sizeof(double);
-
-            int64_t delay_ns = *(reinterpret_cast<int64_t*>(buffer + offset));
-            m_delay = NanoSeconds(delay_ns);
-            offset += sizeof(int64_t);
-
-            m_lossRate = *(reinterpret_cast<double*>(buffer + offset));
-            offset += sizeof(double);
-
-            m_decayFactor = *(reinterpret_cast<double*>(buffer + offset)); // 读取衰减因子
-            
-            delete[] buffer;
-            
-            // 在日志中记录新因子
             NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() 
-                        << "s, Camera received RTCP feedback: Throughput=" << m_throughput 
-                        << " bps, Delay=" << m_delay.GetMilliSeconds() 
-                        << " ms, Loss Rate=" << m_lossRate
-                        << ", DecayFactor=" << m_decayFactor);
-            // --- 修改代码段结束 ---
-
-            // <<< 新增: 会话激活逻辑 >>>
-            if (!m_sessionActive)
-            {
-                NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() 
-                            << "s, Camera " << m_cameraId << " session is now active. Stopping PLAY retries.");
-                m_sessionActive = true;
-                Simulator::Cancel(m_rtspRetryEvent); // 取消下一次的PLAY重试
-            }
-            // <<< 新增结束 >>>
-
-            WriteStatsToFile();
-            PathDecision();
+                        << "s, Camera received new target bitrate from server: " 
+                        << m_targetBitrate << " bps");
+        }
+        else 
+        {
+            NS_LOG_WARN("收到一个未知类型的反馈包，大小为: " << packet->GetSize());
         }
     }
 }
+
+
 
 void YtyCamera::PathDecision(void)
 {

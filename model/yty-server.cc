@@ -17,6 +17,8 @@
 #include <string>
 #include <cmath> // 包含 cmath 以使用 std::abs
 
+#include <nlohmann/json.hpp> // <<< 新增: 需要一个json库，推荐 nlohmann/json,// 您需要将其头文件放到ns-3可以找到的目录// 例如，下载 json.hpp 并放在 /usr/local/include/
+
 
 namespace ns3 {
 
@@ -49,7 +51,11 @@ TypeId YtyServer::GetTypeId(void)
     return tid;
 }
 
-YtyServer::YtyServer() : m_socket(0), m_port(9) {}
+YtyServer::YtyServer() : m_socket(0), m_port(9) {
+    // <<< 新增: 初始化ZMQ上下文 >>>
+    m_zmq_context = std::make_unique<zmq::context_t>(1);
+}
+
 YtyServer::~YtyServer() { m_socket = 0; }
 
 void YtyServer::DoDispose(void)
@@ -227,6 +233,18 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
             session.clientInfo = it->second; 
             // ^^^ 修改 ^^^
 
+
+            // +++ VVV 新增: 为新会话创建并连接ZMQ socket +++
+            NS_LOG_INFO("为新客户端 " << clientIp << " 创建ZMQ连接...");
+            session.zmq_socket = std::make_unique<zmq::socket_t>(*m_zmq_context, zmq::socket_type::req);
+            try {
+                session.zmq_socket->connect("tcp://localhost:5555");
+            } catch(const zmq::error_t& e) {
+                NS_LOG_ERROR("ZMQ连接失败: " << e.what());
+            }
+            // +++ ^^^ 新增 ^^^ +++
+
+
             // --- 新增：解析帧率 ---
             std::string header_key = "X-Frame-Rate: ";
             size_t pos = request.find(header_key);
@@ -299,13 +317,137 @@ void YtyServer::ScheduleReport(const Address& clientAddress)
     }
 }
 
+// 旧版的SendRtcpFeedback
+// void YtyServer::SendRtcpFeedback(const Address& clientAddress)
+// {
+//     if (!m_sessions.count(clientAddress)) return;
+
+//     ClientSession& session = m_sessions[clientAddress];
+//     Time now = Simulator::Now();
+
+//     Time interval = now - session.lastReportTime;
+//     if (interval.IsZero())
+//     {
+//         ScheduleReport(clientAddress);
+//         return;
+//     }
+
+//     double throughput = (session.intervalReceivedBytes * 8) / interval.GetSeconds();
+//     Time avgDelay = (session.intervalReceivedPackets > 0) ? session.intervalTotalDelay / session.intervalReceivedPackets : Seconds(0);
+
+//     uint32_t intervalSent = session.maxSeenSentPackets - session.lastReportedSentPackets;
+//     double lossRate = 0.0;
+//     if (intervalSent > 0)
+//     {
+//         uint64_t receivedInInterval = std::min((uint64_t)intervalSent, session.intervalReceivedPackets);
+//         lossRate = 1.0 - (double)receivedInInterval / intervalSent;
+//     }
+//     if (lossRate < 0) lossRate = 0.0;
+
+
+//     // +++ 新增代码段开始：自适应码率衰减因子计算 +++
+//     // 基于您提供的统计数据：
+//     // 平均延迟: ~36ms, 标准差: ~60ms
+//     // 平均丢包: ~1.7%, 标准差: ~5.7%
+//     // 平均抖动: ~3ms, 标准差: ~0.6ms
+
+//     // int penaltyPoints = 0;
+//     // double currentJitterMs = session.jitter * 1000.0; // 将抖动单位转换为毫秒
+
+//     // // 1. 评估延迟
+//     // if (avgDelay.GetMilliSeconds() > 150.0) penaltyPoints += 4; // 非常差
+//     // else if (avgDelay.GetMilliSeconds() > 100.0) penaltyPoints += 2; // 差
+//     // else if (avgDelay.GetMilliSeconds() > 50.0) penaltyPoints += 1;  // 警告
+
+//     // // 2. 评估丢包率
+//     // if (lossRate > 0.1) penaltyPoints += 4;      // 非常差 (>10%)
+//     // else if (lossRate > 0.05) penaltyPoints += 2; // 差 (>5%)
+//     // else if (lossRate > 0.02) penaltyPoints += 1; // 警告 (>2%)
+
+//     // // 3. 评估抖动
+//     // if (currentJitterMs > 20.0) penaltyPoints += 2; // 差
+//     // else if (currentJitterMs > 10.0) penaltyPoints += 1; // 警告
+
+//     // 4. 将惩罚点数映射到衰减因子
+//     double decayFactor = 1.0;
+//     // if (penaltyPoints >= 9) decayFactor = 0.1;
+//     // else if (penaltyPoints == 8) decayFactor = 0.6;
+//     // else if (penaltyPoints == 7) decayFactor = 0.65;
+//     // else if (penaltyPoints == 6) decayFactor = 0.7;
+//     // else if (penaltyPoints == 5) decayFactor = 0.75;
+//     // else if (penaltyPoints == 4) decayFactor = 0.8;
+//     // else if (penaltyPoints == 3) decayFactor = 0.85;
+//     // else if (penaltyPoints == 2) decayFactor = 0.9;
+//     // else if (penaltyPoints == 1) decayFactor = 0.95;
+
+//     // +++ 新增代码段结束 +++
+
+
+//     // 创建并发送RTCP包
+//     // --- 修改代码段开始：将 decayFactor 加入RTCP负载 ---
+//     // 为decayFactor增加了一个double的空间
+//     uint32_t payloadSize = sizeof(double) + sizeof(int64_t) + sizeof(double) + sizeof(double); 
+//     uint8_t* buffer = new uint8_t[payloadSize];
+//     uint32_t offset = 0;
+//     memcpy(buffer + offset, &throughput, sizeof(double));
+//     offset += sizeof(double);
+//     int64_t delay_ns = avgDelay.GetNanoSeconds();
+//     memcpy(buffer + offset, &delay_ns, sizeof(int64_t));
+//     offset += sizeof(int64_t);
+//     memcpy(buffer + offset, &lossRate, sizeof(double));
+//     offset += sizeof(double);
+//     memcpy(buffer + offset, &decayFactor, sizeof(double)); // 将decayFactor加入缓冲区
+//     Ptr<Packet> rtcpPacket = Create<Packet>(buffer, payloadSize);
+//     delete[] buffer;
+//     // --- 修改代码段结束 ---
+//     m_socket->SendTo(rtcpPacket, 0, clientAddress);
+
+//     // 在日志中增加对新因子的记录
+//     NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4()
+//             << ": IntervalThroughput=" << throughput << " bps, IntervalAvgDelay=" << avgDelay.GetMilliSeconds() << " ms, IntervalLossRate=" << lossRate
+//             << ", DecayFactor=" << decayFactor);
+
+//     // ▼▼▼ 【新增】为日志记录累加抖动值 ▼▼▼
+//     session.logIntervalSumThroughput += throughput;
+//     session.logIntervalSumDelay += avgDelay;
+//     session.logIntervalSumLossRate += lossRate;
+//     session.logIntervalSumJitter += session.jitter; // 累加当前计算的抖动值
+//     session.logIntervalRtcpCount++;
+//     // ▲▲▲ 【新增】为日志记录累加抖动值 ▲▲▲
+
+
+//     // ▼▼▼ 添加调试日志 ▼▼▼
+//     // NS_LOG_INFO("--- DEBUG --- "
+//     //             << "Time: " << now.GetSeconds() << "s, "
+//     //             << "Client: " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << ", "
+//     //             << "TotalDelay before reset: " << session.intervalTotalDelay.GetMilliSeconds() << "ms, "
+//     //             << "Packets in interval: " << session.intervalReceivedPackets);
+//     // ▲▲▲ 添加调试日志 ▲▲▲
+
+//     // ▼▼▼ 【新增】为日志记录累加RTCP统计信息 ▼▼▼
+//     session.logIntervalSumThroughput += throughput;
+//     session.logIntervalSumDelay += avgDelay;
+//     session.logIntervalSumLossRate += lossRate;
+//     session.logIntervalRtcpCount++;
+//     // ▲▲▲ 【新增】为日志记录累加RTCP统计信息 ▲▲▲
+    
+//     // 【至关重要】重置周期统计变量，并更新状态
+//     session.intervalReceivedPackets = 0;
+//     session.intervalReceivedBytes = 0;
+//     session.intervalTotalDelay = Seconds(0);
+//     session.lastReportedSentPackets = session.maxSeenSentPackets;
+//     session.lastReportTime = now;
+
+//     ScheduleReport(clientAddress);
+// }
+
+
 void YtyServer::SendRtcpFeedback(const Address& clientAddress)
 {
     if (!m_sessions.count(clientAddress)) return;
 
     ClientSession& session = m_sessions[clientAddress];
     Time now = Simulator::Now();
-
     Time interval = now - session.lastReportTime;
     if (interval.IsZero())
     {
@@ -313,9 +455,9 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
         return;
     }
 
-    double throughput = (session.intervalReceivedBytes * 8) / interval.GetSeconds();
+    // --- 1. 计算网络状态 (与之前相同) ---
+    double throughputBps = (session.intervalReceivedBytes * 8) / interval.GetSeconds();
     Time avgDelay = (session.intervalReceivedPackets > 0) ? session.intervalTotalDelay / session.intervalReceivedPackets : Seconds(0);
-
     uint32_t intervalSent = session.maxSeenSentPackets - session.lastReportedSentPackets;
     double lossRate = 0.0;
     if (intervalSent > 0)
@@ -325,94 +467,21 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     }
     if (lossRate < 0) lossRate = 0.0;
 
+    // --- 2. 【核心修改】调用AI模块获取码率，而不是计算decayFactor ---
+    double throughputKbps = throughputBps / 1000.0;
+    uint32_t targetBitrate = GetBitrateFromAI(session, throughputKbps, avgDelay, lossRate);
 
-    // +++ 新增代码段开始：自适应码率衰减因子计算 +++
-    // 基于您提供的统计数据：
-    // 平均延迟: ~36ms, 标准差: ~60ms
-    // 平均丢包: ~1.7%, 标准差: ~5.7%
-    // 平均抖动: ~3ms, 标准差: ~0.6ms
-
-    // int penaltyPoints = 0;
-    // double currentJitterMs = session.jitter * 1000.0; // 将抖动单位转换为毫秒
-
-    // // 1. 评估延迟
-    // if (avgDelay.GetMilliSeconds() > 150.0) penaltyPoints += 4; // 非常差
-    // else if (avgDelay.GetMilliSeconds() > 100.0) penaltyPoints += 2; // 差
-    // else if (avgDelay.GetMilliSeconds() > 50.0) penaltyPoints += 1;  // 警告
-
-    // // 2. 评估丢包率
-    // if (lossRate > 0.1) penaltyPoints += 4;      // 非常差 (>10%)
-    // else if (lossRate > 0.05) penaltyPoints += 2; // 差 (>5%)
-    // else if (lossRate > 0.02) penaltyPoints += 1; // 警告 (>2%)
-
-    // // 3. 评估抖动
-    // if (currentJitterMs > 20.0) penaltyPoints += 2; // 差
-    // else if (currentJitterMs > 10.0) penaltyPoints += 1; // 警告
-
-    // 4. 将惩罚点数映射到衰减因子
-    double decayFactor = 1.0;
-    // if (penaltyPoints >= 9) decayFactor = 0.1;
-    // else if (penaltyPoints == 8) decayFactor = 0.6;
-    // else if (penaltyPoints == 7) decayFactor = 0.65;
-    // else if (penaltyPoints == 6) decayFactor = 0.7;
-    // else if (penaltyPoints == 5) decayFactor = 0.75;
-    // else if (penaltyPoints == 4) decayFactor = 0.8;
-    // else if (penaltyPoints == 3) decayFactor = 0.85;
-    // else if (penaltyPoints == 2) decayFactor = 0.9;
-    // else if (penaltyPoints == 1) decayFactor = 0.95;
-
-    // +++ 新增代码段结束 +++
-
-
-    // 创建并发送RTCP包
-    // --- 修改代码段开始：将 decayFactor 加入RTCP负载 ---
-    // 为decayFactor增加了一个double的空间
-    uint32_t payloadSize = sizeof(double) + sizeof(int64_t) + sizeof(double) + sizeof(double); 
-    uint8_t* buffer = new uint8_t[payloadSize];
-    uint32_t offset = 0;
-    memcpy(buffer + offset, &throughput, sizeof(double));
-    offset += sizeof(double);
-    int64_t delay_ns = avgDelay.GetNanoSeconds();
-    memcpy(buffer + offset, &delay_ns, sizeof(int64_t));
-    offset += sizeof(int64_t);
-    memcpy(buffer + offset, &lossRate, sizeof(double));
-    offset += sizeof(double);
-    memcpy(buffer + offset, &decayFactor, sizeof(double)); // 将decayFactor加入缓冲区
-    Ptr<Packet> rtcpPacket = Create<Packet>(buffer, payloadSize);
-    delete[] buffer;
-    // --- 修改代码段结束 ---
+    // --- 3. 【核心修改】将新的目标码率发送回摄像头 ---
+    // 我们需要修改反馈包的结构。不再发送一堆统计数据和decayFactor,
+    // 而是直接发送一个 uint32_t 的目标码率 (bps)。
+    Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&targetBitrate), sizeof(uint32_t));
     m_socket->SendTo(rtcpPacket, 0, clientAddress);
 
-    // 在日志中增加对新因子的记录
-    NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4()
-            << ": IntervalThroughput=" << throughput << " bps, IntervalAvgDelay=" << avgDelay.GetMilliSeconds() << " ms, IntervalLossRate=" << lossRate
-            << ", DecayFactor=" << decayFactor);
+    NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to " 
+            << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4()
+            << " with AI-chosen target bitrate: " << targetBitrate << " bps");
 
-    // ▼▼▼ 【新增】为日志记录累加抖动值 ▼▼▼
-    session.logIntervalSumThroughput += throughput;
-    session.logIntervalSumDelay += avgDelay;
-    session.logIntervalSumLossRate += lossRate;
-    session.logIntervalSumJitter += session.jitter; // 累加当前计算的抖动值
-    session.logIntervalRtcpCount++;
-    // ▲▲▲ 【新增】为日志记录累加抖动值 ▲▲▲
-
-
-    // ▼▼▼ 添加调试日志 ▼▼▼
-    // NS_LOG_INFO("--- DEBUG --- "
-    //             << "Time: " << now.GetSeconds() << "s, "
-    //             << "Client: " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << ", "
-    //             << "TotalDelay before reset: " << session.intervalTotalDelay.GetMilliSeconds() << "ms, "
-    //             << "Packets in interval: " << session.intervalReceivedPackets);
-    // ▲▲▲ 添加调试日志 ▲▲▲
-
-    // ▼▼▼ 【新增】为日志记录累加RTCP统计信息 ▼▼▼
-    session.logIntervalSumThroughput += throughput;
-    session.logIntervalSumDelay += avgDelay;
-    session.logIntervalSumLossRate += lossRate;
-    session.logIntervalRtcpCount++;
-    // ▲▲▲ 【新增】为日志记录累加RTCP统计信息 ▲▲▲
-    
-    // 【至关重要】重置周期统计变量，并更新状态
+    // --- 4. 重置统计数据 (与之前相同) ---
     session.intervalReceivedPackets = 0;
     session.intervalReceivedBytes = 0;
     session.intervalTotalDelay = Seconds(0);
@@ -576,5 +645,57 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     // 安排下一次日志事件
     ScheduleLog(clientAddress);
 }
+
+
+// +++ VVV 新增: GetBitrateFromAI 方法的实现 +++
+uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double throughputKbps, Time delay, double lossRate)
+{
+    // 默认码率，如果AI通信失败则使用
+    const uint32_t DEFAULT_BITRATE = 1000000; // 1 Mbps
+
+    if (!session.zmq_socket) {
+        NS_LOG_WARN("ZMQ socket for camera " << session.clientInfo.cameraId << " is not initialized.");
+        return DEFAULT_BITRATE;
+    }
+
+    // 1. 构建JSON请求
+    nlohmann::json request_json;
+    request_json["cameraId"] = session.clientInfo.cameraId;
+    request_json["throughputKbps"] = throughputKbps;
+    request_json["delayMs"] = delay.GetMilliSeconds();
+    request_json["lossRate"] = lossRate;
+    
+    std::string request_str = request_json.dump();
+
+    try {
+        // 2. 发送请求
+        zmq::message_t request_msg(request_str.begin(), request_str.end());
+        session.zmq_socket->send(request_msg, zmq::send_flags::none);
+
+        // 3. 等待回复 (这里使用带超时的轮询，防止仿真卡死)
+        zmq::message_t reply_msg;
+        auto res = session.zmq_socket->recv(reply_msg, zmq::recv_flags::none);
+
+        if (res.has_value() && res.value() > 0)
+        {
+            // 4. 解析回复
+            std::string reply_str(static_cast<char*>(reply_msg.data()), reply_msg.size());
+            auto reply_json = nlohmann::json::parse(reply_str);
+            return reply_json.at("targetBitrate").get<uint32_t>();
+        } else {
+            NS_LOG_WARN("从Python服务器接收ZMQ回复失败或超时。");
+            return DEFAULT_BITRATE;
+        }
+
+    } catch (const zmq::error_t& e) {
+        NS_LOG_ERROR("ZMQ通信错误: " << e.what());
+        return DEFAULT_BITRATE;
+    } catch (const nlohmann::json::exception& e) {
+        NS_LOG_ERROR("JSON解析错误: " << e.what());
+        return DEFAULT_BITRATE;
+    }
+}
+// +++ ^^^ 新增 ^^^ +++
+
 
 } // namespace ns3

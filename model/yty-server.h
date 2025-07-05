@@ -14,6 +14,10 @@
 #include <map>
 #include <vector>
 #include <fstream> // 为 std::ofstream 添加此头文件
+#include <memory> // <<< 新增: 用于智能指针
+
+// <<< 新增: 包含了zmq的头文件 >>>
+#include "zmq.hpp"
 
 namespace ns3 {
 
@@ -122,6 +126,11 @@ private:
         ClientInfo clientInfo;
         // ^^^ 修改 ^^^
 
+        // VVV 新增: ZMQ相关的成员 VVV
+        // 指向与该客户端通信的ZMQ socket的智能指针
+        std::unique_ptr<zmq::socket_t> zmq_socket;
+        // ^^^ 新增 ^^^
+
         // 构造函数
         ClientSession() :
             intervalReceivedPackets(0),
@@ -150,8 +159,10 @@ private:
             // ▲▲▲ 【新增】初始化新增的成员变量 ▲▲▲
 
             // --- VVV 新增：初始化抖动累加器 VVV ---
-            logIntervalSumJitter(0.0)
+            logIntervalSumJitter(0.0),
             // --- ^^^ 新增 ^^^ ---
+
+            zmq_socket(nullptr) // <<< 新增: 初始化为空指针
             
         {
         }
@@ -190,6 +201,23 @@ private:
     // VVV 新增: 客户端信息注册表 VVV
     // 将每个客户端的IP地址映射到其完整的元数据
     std::map<Ipv4Address, ClientInfo> m_clientInfoRegistry;
+    // ^^^ 新增 ^^^
+
+    // VVV 新增: ZMQ上下文 VVV
+    // ZMQ的上下文环境，对于整个服务器应用应该是唯一的
+    std::unique_ptr<zmq::context_t> m_zmq_context;
+    // ^^^ 新增 ^^^
+
+    // VVV 新增: 一个新的私有方法，用于和Python端交互 VVV
+    /**
+     * @brief 从Python RL Agent获取码率决策
+     * @param session 相关的客户端会话
+     * @param throughput 当前测量的吞吐率 (kbps)
+     * @param delay 当前测量的延迟 (ms)
+     * @param lossRate 当前测量的丢包率
+     * @return Agent决策的目标码率 (bps)
+     */
+    uint32_t GetBitrateFromAI(ClientSession& session, double throughput, Time delay, double lossRate);
     // ^^^ 新增 ^^^
 };
 

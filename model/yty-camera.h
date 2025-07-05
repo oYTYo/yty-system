@@ -138,7 +138,8 @@ private:
     bool m_sessionActive;      // <<< 新增: 标记会话是否已激活
     EventId m_rtspRetryEvent;  // <<< 新增: 用于RTSP PLAY重试的事件
 
-    double m_decayFactor; // 用于存储从服务器反馈的码率衰减因子
+    // double m_decayFactor; // <<<【移除】不再需要衰减因子
+    uint32_t m_targetBitrate; // <<<【新增】用于存储从服务器获取的目标码率 (bps)
     
     std::string m_codec; // <<< 【新增】用于存储摄像头编码格式的成员变量
 
