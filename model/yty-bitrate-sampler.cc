@@ -72,11 +72,17 @@ uint32_t BitrateSampler::Sample()
     
     double sampledValue = normalSampler->GetValue();
 
-    // 3. 防报错逻辑：确保码率不小于300bps
+    // 3. 防报错逻辑：确保码率不小于300bps且不大于10Mbps
     const uint32_t minBitrate = 300;
+    const uint32_t maxBitrate = 10000000;
     if (sampledValue < minBitrate)
     {
         return minBitrate;
+    }
+
+    if (sampledValue > maxBitrate)
+    {
+        return maxBitrate;
     }
 
     return static_cast<uint32_t>(sampledValue);

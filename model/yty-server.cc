@@ -317,7 +317,7 @@ void YtyServer::ScheduleReport(const Address& clientAddress)
     }
 }
 
-// 旧版的SendRtcpFeedback
+// 原始的SendRtcpFeedback
 // void YtyServer::SendRtcpFeedback(const Address& clientAddress)
 // {
 //     if (!m_sessions.count(clientAddress)) return;
@@ -467,21 +467,29 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     }
     if (lossRate < 0) lossRate = 0.0;
 
-    // --- 2. 【核心修改】调用AI模块获取码率，而不是计算decayFactor ---
+    // --- 2. 【核心修改】调用AI模块获取码率 ---
     double throughputKbps = throughputBps / 1000.0;
     uint32_t targetBitrate = GetBitrateFromAI(session, throughputKbps, avgDelay, lossRate);
 
     // --- 3. 【核心修改】将新的目标码率发送回摄像头 ---
-    // 我们需要修改反馈包的结构。不再发送一堆统计数据和decayFactor,
-    // 而是直接发送一个 uint32_t 的目标码率 (bps)。
     Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&targetBitrate), sizeof(uint32_t));
     m_socket->SendTo(rtcpPacket, 0, clientAddress);
 
-    NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to " 
+    NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to "
             << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4()
             << " with AI-chosen target bitrate: " << targetBitrate << " bps");
 
-    // --- 4. 重置统计数据 (与之前相同) ---
+    // ▼▼▼ 【【【修复的关键代码】】】 ▼▼▼
+    // 将当前计算出的指标累加到日志统计变量中
+    session.logIntervalSumThroughput += throughputBps;
+    session.logIntervalSumDelay += avgDelay;
+    session.logIntervalSumLossRate += lossRate;
+    session.logIntervalSumJitter += session.jitter; // 累加当前计算的抖动值
+    session.logIntervalRtcpCount++;
+    // ▲▲▲ 【【【修复的关键代码】】】 ▲▲▲
+
+
+    // --- 4. 重置周期统计数据 (与之前相同) ---
     session.intervalReceivedPackets = 0;
     session.intervalReceivedBytes = 0;
     session.intervalTotalDelay = Seconds(0);
