@@ -19,6 +19,8 @@
 
 #include <nlohmann/json.hpp> // <<< 新增: 需要一个json库，推荐 nlohmann/json,// 您需要将其头文件放到ns-3可以找到的目录// 例如，下载 json.hpp 并放在 /usr/local/include/
 
+// +++ 【新增】确保 BitrateSampler 被包含 +++
+#include "yty-bitrate-sampler.h"
 
 namespace ns3 {
 
@@ -72,7 +74,9 @@ void YtyServer::RegisterClientInfo(const Ipv4Address& clientIp, const ClientInfo
     NS_LOG_INFO("Registered: IP=" << clientIp 
                 << ", CamID=" << info.cameraId 
                 << ", Type=" << info.accessType
-                << ", Region=" << info.region);
+                << ", Region=" << info.region
+                // 确认采样器是否被成功传入
+                << ", BitrateSampler ptr=" << info.bitrateSampler);
 }
 // ^^^ 新增 ^^^
 
@@ -94,8 +98,8 @@ void YtyServer::StartApplication(void)
     m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
     if (m_logFile.is_open())
     {
-        // <<< 【修改】在日志表头中加入 "Codec"
-        m_logFile << "Time(s)\tClientAddr\tThroughput(bps)\tDelay(ms)\tLossRate\tJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion\tCodec" << std::endl;
+        // +++ 【修改】在日志表头中加入 "DeltaBps" +++
+        m_logFile << "Time(s)\tClientAddr\tThroughput(bps)\tDelay(ms)\tLossRate\tJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion\tCodec\tDeltaBps" << std::endl;
     }
     
 }
@@ -238,7 +242,7 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
             NS_LOG_INFO("为新客户端 " << clientIp << " 创建ZMQ连接...");
             session.zmq_socket = std::make_unique<zmq::socket_t>(*m_zmq_context, zmq::socket_type::req);
             try {
-                session.zmq_socket->connect("tcp://localhost:5555");
+                session.zmq_socket->connect("tcp://localhost:5556");
             } catch(const zmq::error_t& e) {
                 NS_LOG_ERROR("ZMQ连接失败: " << e.what());
             }
@@ -619,7 +623,14 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     }
     // ▲▲▲ 【新增】计算包括抖动在内的各项指标平均值 ▲▲▲
 
-    // ▼▼▼ 【修改】将抖动值写入日志文件 ▼▼▼
+    // +++ 【新增】计算 delta-btr 的平均值 +++
+    int64_t avgDeltaBps = 0;
+    if (session.logIntervalDeltaCount > 0)
+    {
+        avgDeltaBps = session.logIntervalSumDeltaBitrate / session.logIntervalDeltaCount;
+    }
+
+    // ▼▼▼ 【修改】将 DeltaBps 写入日志文件 ▼▼▼
     if (m_logFile.is_open())
     {
         m_logFile << Simulator::Now().GetSeconds() << "\t"
@@ -634,7 +645,8 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
                   << session.clientInfo.cameraId << "\t"
                   << session.clientInfo.accessType << "\t"
                   << session.clientInfo.region << "\t"
-                  << session.clientInfo.codec << std::endl; // <<< 【修改】写入Codec信息
+                  << session.clientInfo.codec << "\t"
+                  << avgDeltaBps << std::endl; // 写入码率差值
     }
     // ▲▲▲ 【修改】将抖动值写入日志文件 ▲▲▲
     
@@ -650,60 +662,90 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     session.logIntervalRtcpCount = 0;
     // ▲▲▲ 【新增】重置所有日志相关的统计量，包括抖动 ▲▲▲
 
+    // +++ 【新增】重置 delta-btr 的累加器 +++
+    session.logIntervalSumDeltaBitrate = 0;
+    session.logIntervalDeltaCount = 0;
+
     // 安排下一次日志事件
     ScheduleLog(clientAddress);
 }
 
 
-// +++ VVV 新增: GetBitrateFromAI 方法的实现 +++
+// +++ 【修正版】GetBitrateFromAI 函数 +++
 uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double throughputKbps, Time delay, double lossRate)
 {
     // 默认码率，如果AI通信失败则使用
     const uint32_t DEFAULT_BITRATE = 1000000; // 1 Mbps
+    // 1. 将目标码率初始化为默认值
+    uint32_t targetBitrate = DEFAULT_BITRATE;
 
     if (!session.zmq_socket) {
         NS_LOG_WARN("ZMQ socket for camera " << session.clientInfo.cameraId << " is not initialized.");
-        return DEFAULT_BITRATE;
-    }
+        // 如果socket无效，将使用默认码率继续执行下面的差值计算
+    } 
+    else 
+    {
+        // 2. 构建JSON请求
+        nlohmann::json request_json;
+        request_json["cameraId"] = session.clientInfo.cameraId;
+        request_json["throughputKbps"] = throughputKbps;
+        request_json["delayMs"] = delay.GetMilliSeconds();
+        request_json["lossRate"] = lossRate;
+        
+        std::string request_str = request_json.dump();
 
-    // 1. 构建JSON请求
-    nlohmann::json request_json;
-    request_json["cameraId"] = session.clientInfo.cameraId;
-    request_json["throughputKbps"] = throughputKbps;
-    request_json["delayMs"] = delay.GetMilliSeconds();
-    request_json["lossRate"] = lossRate;
-    
-    std::string request_str = request_json.dump();
+        try {
+            // 3. 发送请求
+            zmq::message_t request_msg(request_str.begin(), request_str.end());
+            session.zmq_socket->send(request_msg, zmq::send_flags::none);
 
-    try {
-        // 2. 发送请求
-        zmq::message_t request_msg(request_str.begin(), request_str.end());
-        session.zmq_socket->send(request_msg, zmq::send_flags::none);
+            // 4. 等待回复
+            zmq::message_t reply_msg;
+            auto res = session.zmq_socket->recv(reply_msg, zmq::recv_flags::none);
 
-        // 3. 等待回复 (这里使用带超时的轮询，防止仿真卡死)
-        zmq::message_t reply_msg;
-        auto res = session.zmq_socket->recv(reply_msg, zmq::recv_flags::none);
+            if (res.has_value() && res.value() > 0)
+            {
+                // 5. 解析回复并更新目标码率
+                std::string reply_str(static_cast<char*>(reply_msg.data()), reply_msg.size());
+                auto reply_json = nlohmann::json::parse(reply_str);
+                targetBitrate = reply_json.at("targetBitrate").get<uint32_t>();
+            } else {
+                NS_LOG_WARN("从Python服务器接收ZMQ回复失败或超时，将使用默认码率。");
+                // 此处不返回，让函数继续执行，使用默认的 targetBitrate
+            }
 
-        if (res.has_value() && res.value() > 0)
-        {
-            // 4. 解析回复
-            std::string reply_str(static_cast<char*>(reply_msg.data()), reply_msg.size());
-            auto reply_json = nlohmann::json::parse(reply_str);
-            return reply_json.at("targetBitrate").get<uint32_t>();
-        } else {
-            NS_LOG_WARN("从Python服务器接收ZMQ回复失败或超时。");
-            return DEFAULT_BITRATE;
+        } catch (const zmq::error_t& e) {
+            NS_LOG_ERROR("ZMQ通信错误: " << e.what() << "，将使用默认码率。");
+            // 此处不返回
+        } catch (const nlohmann::json::exception& e) {
+            NS_LOG_ERROR("JSON解析错误: " << e.what() << "，将使用默认码率。");
+            // 此处不返回
         }
-
-    } catch (const zmq::error_t& e) {
-        NS_LOG_ERROR("ZMQ通信错误: " << e.what());
-        return DEFAULT_BITRATE;
-    } catch (const nlohmann::json::exception& e) {
-        NS_LOG_ERROR("JSON解析错误: " << e.what());
-        return DEFAULT_BITRATE;
     }
+
+    // 6. 【统一计算差值】无论码率从何而来（AI或默认），都在这里计算与原始采样的差值
+    if (session.clientInfo.bitrateSampler)
+    {
+        uint32_t originalSampledBitrate = session.clientInfo.bitrateSampler->Sample();
+        int64_t delta = static_cast<int64_t>(targetBitrate) - static_cast<int64_t>(originalSampledBitrate);
+        
+        // 累加到日志统计变量中
+        session.logIntervalSumDeltaBitrate += delta;
+        session.logIntervalDeltaCount++;
+
+        NS_LOG_INFO("Camera " << session.clientInfo.cameraId 
+                    << ": AI/Target Bitrate=" << targetBitrate 
+                    << " bps, Original Sampled Bitrate=" << originalSampledBitrate 
+                    << " bps, Delta=" << delta << " bps");
+    }
+    else
+    {
+        NS_LOG_WARN("未找到摄像头 " << session.clientInfo.cameraId << " 的码率采样器，无法计算差值。");
+    }
+    
+    // 7. 【统一返回】在函数末尾统一返回最终确定的目标码率
+    return targetBitrate;
 }
-// +++ ^^^ 新增 ^^^ +++
 
 
 } // namespace ns3

@@ -8,21 +8,27 @@
 #include "ns3/ptr.h"
 #include "ns3/address.h"
 #include "ns3/traced-callback.h"
-#include "yty-camera.h" // 需要包含摄像头头文件以使用RtpHeader
-#include "ns3/ipv4-address.h" // <<< 新增: 包含IPv4地址头文件
+#include "yty-camera.h"
+#include "ns3/ipv4-address.h"
+
+// +++ 【新增】包含 BitrateSampler 头文件 +++
+#include "yty-bitrate-sampler.h"
 
 #include <map>
 #include <vector>
-#include <fstream> // 为 std::ofstream 添加此头文件
-#include <memory> // <<< 新增: 用于智能指针
+#include <fstream>
+#include <memory>
 
-// <<< 新增: 包含了zmq的头文件 >>>
+
 #include "zmq.hpp"
 
 namespace ns3 {
 
 class Socket;
 class Packet;
+// +++ 【新增】前向声明 BitrateSampler 类 +++
+class BitrateSampler;
+
 
 /**
  * @brief 一个接收视频流的服务器应用
@@ -37,7 +43,6 @@ public:
     YtyServer();
     virtual ~YtyServer();
 
-    // VVV 新增: 客户端元数据结构体和注册方法 VVV
     /**
      * @brief 存储一个客户端网络接口的所有相关信息
      */
@@ -45,11 +50,14 @@ public:
         uint32_t    cameraId;
         std::string accessType;
         std::string region;
-        std::string codec; // <<< 【新增】存储编码格式
+        std::string codec;
 
-        ClientInfo() : cameraId(0), accessType("Unknown"), region("Unknown"), codec("Unknown") {} // <<< 【修改】构造函数初始化
-        ClientInfo(uint32_t id, std::string type, std::string reg, std::string c) // <<< 【修改】构造函数
-        : cameraId(id), accessType(type), region(reg), codec(c) {}
+        // +++ 【新增】用于存储从脚本传入的采样器实例 +++
+        Ptr<BitrateSampler> bitrateSampler; 
+
+        ClientInfo() : cameraId(0), accessType("Unknown"), region("Unknown"), codec("Unknown"), bitrateSampler(nullptr) {} // <<< 【修改】构造函数初始化
+        ClientInfo(uint32_t id, std::string type, std::string reg, std::string c, Ptr<BitrateSampler> sampler) // <<< 【修改】构造函数
+        : cameraId(id), accessType(type), region(reg), codec(c), bitrateSampler(sampler) {}
     };
 
     /**
@@ -58,7 +66,7 @@ public:
      * @param info 包含该接口所有元数据的结构体
      */
     void RegisterClientInfo(const Ipv4Address& clientIp, const ClientInfo& info);
-    // ^^^ 新增 ^^^
+
 
 protected:
     virtual void DoDispose(void);
@@ -105,31 +113,38 @@ private:
         uint32_t stutterEvents;         // 当前1秒周期内的总卡顿次数
         EventId  logStatsEvent;         // 触发日志记录的事件
 
-        // --- VVV 新增：用于抖动计算的状态变量 VVV ---
+        // --- 用于抖动计算的状态变量 VVV ---
         Time     lastArrivalTime;       // 上一个RTP包的到达时间
         Time     lastSentTime;          // 上一个RTP包的发送时间
         double   jitter;                // 计算出的抖动值 (单位: 秒)
-        // --- ^^^ 新增 ^^^ ---
+     
 
-        // ▼▼▼ 【新增】用于日志记录的RTCP指标累加器 ▼▼▼
+        // ▼▼▼ 用于日志记录的RTCP指标累加器 ▼▼▼
         double   logIntervalSumThroughput; // 日志周期内，吞吐率的总和
         Time     logIntervalSumDelay;      // 日志周期内，延迟的总和
         double   logIntervalSumLossRate;   // 日志周期内，丢包率的总和
         uint32_t logIntervalRtcpCount;     // 日志周期内，收到的RTCP包数量
-        // ▲▲▲ 【新增】用于日志记录的RTCP指标累加器 ▲▲▲
+
 
         // --- VVV 新增：用于抖动日志的累加器 VVV ---
         double   logIntervalSumJitter;      // 日志周期内，抖动的总和
-        // --- ^^^ 新增 ^^^ ---
+     
 
-        // VVV 修改: 直接包含一个ClientInfo结构体 VVV
+        // 直接包含一个ClientInfo结构体 VVV
         ClientInfo clientInfo;
-        // ^^^ 修改 ^^^
 
-        // VVV 新增: ZMQ相关的成员 VVV
+
+        // ZMQ相关的成员
         // 指向与该客户端通信的ZMQ socket的智能指针
         std::unique_ptr<zmq::socket_t> zmq_socket;
-        // ^^^ 新增 ^^^
+
+
+        // +++ VVV 【新增】delta-btr 相关成员 +++
+        int64_t  logIntervalSumDeltaBitrate; // 日志周期内，（AI码率 - 采样码率）的总和
+        uint32_t logIntervalDeltaCount;      // 日志周期内，差值计算的次数
+        // +++ ^^^ 【新增】delta-btr 相关成员 ^^^ +++
+
+
 
         // 构造函数
         ClientSession() :
@@ -144,25 +159,28 @@ private:
             frameRate(30), // 给一个默认值, 以防协商失败
             playedFrames(0),
             stutterEvents(0),
-            // --- VVV 新增：初始化新增的抖动相关成员变量 VVV ---
+            // --- 初始化新增的抖动相关成员变量 ---
             lastArrivalTime(Seconds(0)),
             lastSentTime(Seconds(0)),
             jitter(0.0),
-            // --- ^^^ 新增 ^^^ ---
-            
+          
 
-            // ▼▼▼ 【新增】初始化新增的成员变量 ▼▼▼
+            // 初始化新增的成员变量
             logIntervalSumThroughput(0.0),
             logIntervalSumDelay(Seconds(0)),
             logIntervalSumLossRate(0.0),
             logIntervalRtcpCount(0),
-            // ▲▲▲ 【新增】初始化新增的成员变量 ▲▲▲
+          
 
-            // --- VVV 新增：初始化抖动累加器 VVV ---
+            // --- 初始化抖动累加器---
             logIntervalSumJitter(0.0),
-            // --- ^^^ 新增 ^^^ ---
+           
+            zmq_socket(nullptr), // <<< 新增: 初始化为空指针
 
-            zmq_socket(nullptr) // <<< 新增: 初始化为空指针
+            // +++ VVV 【新增】初始化 delta-btr 相关成员 +++
+            logIntervalSumDeltaBitrate(0),
+            logIntervalDeltaCount(0)
+            // +++ ^^^ 【新增】初始化 delta-btr 相关成员 ^^^ +++
             
         {
         }
@@ -198,17 +216,17 @@ private:
     std::ofstream m_logFile;
     Time m_logInterval;
 
-    // VVV 新增: 客户端信息注册表 VVV
+    // VVV 客户端信息注册表 VVV
     // 将每个客户端的IP地址映射到其完整的元数据
     std::map<Ipv4Address, ClientInfo> m_clientInfoRegistry;
-    // ^^^ 新增 ^^^
+   
 
-    // VVV 新增: ZMQ上下文 VVV
+    // VVV ZMQ上下文 VVV
     // ZMQ的上下文环境，对于整个服务器应用应该是唯一的
     std::unique_ptr<zmq::context_t> m_zmq_context;
-    // ^^^ 新增 ^^^
+  
 
-    // VVV 新增: 一个新的私有方法，用于和Python端交互 VVV
+    // VVV 一个新的私有方法，用于和Python端交互 VVV
     /**
      * @brief 从Python RL Agent获取码率决策
      * @param session 相关的客户端会话
@@ -218,7 +236,7 @@ private:
      * @return Agent决策的目标码率 (bps)
      */
     uint32_t GetBitrateFromAI(ClientSession& session, double throughput, Time delay, double lossRate);
-    // ^^^ 新增 ^^^
+    
 };
 
 } // namespace ns3
