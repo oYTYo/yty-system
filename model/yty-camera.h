@@ -12,6 +12,8 @@
 
 #include <queue>
 #include <fstream>
+#include "yty-codec-simulator.h"
+
 
 #include "ns3/data-rate.h"
 
@@ -42,6 +44,10 @@ public:
     virtual void Serialize(Buffer::Iterator start) const;
     virtual uint32_t Deserialize(Buffer::Iterator start);
 
+    // +++ 【新增】用于识别RTP包的魔数 +++
+    void SetMagic(uint8_t magic) { m_magic = magic; }
+    uint8_t GetMagic() const { return m_magic; }
+
     // Setters and Getters for our data
     void SetTimestamp(uint64_t ts) { m_timestamp = ts; }
     uint64_t GetTimestamp() const { return m_timestamp; }
@@ -60,6 +66,7 @@ public:
 
 
 private:
+    uint8_t  m_magic;       // 魔数，例如 0xAC
     uint64_t m_timestamp;
     uint32_t m_frameSeq;
     uint32_t m_packetSeq;
@@ -81,11 +88,6 @@ public:
 
     void SetRemote(Address ip, uint16_t port);
 
-    /**
-    * @brief 设置码率采样器
-    * @param sampler 指向码率采样器实例的智能指针
-    */
-    void SetBitrateSampler(Ptr<BitrateSampler> sampler); // <<< 新增：设置采样器的方法
 
 protected:
     virtual void DoDispose(void);
@@ -94,20 +96,22 @@ private:
     virtual void StartApplication(void);
     virtual void StopApplication(void);
 
+    // +++ 【新增】新的私有方法，用于处理码率决策和参数上报 +++
+    void UpdateEncodingParameters(uint32_t bandwidthBps);
+    void SendEncodingParams();
+
     void ScheduleTx(void);
     void SendPacket(void);
     void Encoder(void);
     void HandleRead(Ptr<Socket> socket);
     void SendRtpPacket(Ptr<Packet> packet);
     void SendRtspRequest(std::string method);
-    void PathDecision(void);
-    void WriteStatsToFile();
+
 
     Ptr<Socket> m_socket;
     Address m_peerAddress;
     uint16_t m_peerPort;
 
-    // uint32_t m_bitrate;
     uint32_t m_frameRate;
     uint32_t m_packetSize;
     DataRate m_sendRate;
@@ -120,16 +124,6 @@ private:
 
     uint32_t m_frameSeqCounter;
     uint32_t m_cumulativePacketsSent;
-    
-    double m_throughput;
-    Time m_delay;
-    double m_lossRate;
-
-    std::string m_logFileName;
-    std::ofstream m_logFile;
-    bool m_logEnabled; // <<< 新增：日志启用/禁用开关
-
-    Ptr<BitrateSampler> m_bitrateSampler; // <<< 新增了一个指向 BitrateSampler 对象的智能指针 Ptr<BitrateSampler> m_bitrateSampler，让每个摄像头实例都可以持有一个采样器。
 
     uint32_t m_cameraId; // 摄像头的唯一ID
 
@@ -138,10 +132,15 @@ private:
     bool m_sessionActive;      // <<< 新增: 标记会话是否已激活
     EventId m_rtspRetryEvent;  // <<< 新增: 用于RTSP PLAY重试的事件
 
-    // double m_decayFactor; // <<<【移除】不再需要衰减因子
-    uint32_t m_targetBitrate; // <<<【新增】用于存储从服务器获取的目标码率 (bps)
-    
-    std::string m_codec; // <<< 【新增】用于存储摄像头编码格式的成员变量
+    // --- 【核心修改】用我们新的编码器模拟器和参数变量替代旧的逻辑 ---
+    std::unique_ptr<YtyCodecSimulator> m_codecSimulator; // 编码器模拟器实例
+    std::string m_codec;        // 编码器类型 (H.264/H.265)
+    std::string m_resolution;   // 当前分辨率
+    uint32_t    m_crf;          // 当前CRF
+
+    // 这个变量现在存储由 CodecSimulator 决定的【真实】码率
+    uint32_t m_actualBitrate;
+
 
 };
 

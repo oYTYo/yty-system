@@ -10,7 +10,8 @@ set(SOURCE_FILES
   helper/yty-server-helper.cc
   model/yty-camera.cc
   model/yty-server.cc
-  model/yty-bitrate-sampler.cc # <-- 我之前漏掉了这一行！现在加回来。
+  # model/yty-bitrate-sampler.cc
+  model/yty-codec-simulator.cc
 )
 
 set(HEADER_FILES
@@ -18,7 +19,8 @@ set(HEADER_FILES
   helper/yty-server-helper.h
   model/yty-camera.h
   model/yty-server.h
-  model/yty-bitrate-sampler.h # <-- 对应的头文件也加上，保持规范。
+  # model/yty-bitrate-sampler.h
+  model/yty-codec-simulator.h
 )
 
 # 3. 查找项目依赖的外部库

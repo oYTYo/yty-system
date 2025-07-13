@@ -19,8 +19,7 @@
 
 #include <nlohmann/json.hpp> // <<< 新增: 需要一个json库，推荐 nlohmann/json,// 您需要将其头文件放到ns-3可以找到的目录// 例如，下载 json.hpp 并放在 /usr/local/include/
 
-// +++ 【新增】确保 BitrateSampler 被包含 +++
-#include "yty-bitrate-sampler.h"
+#include "yty-camera.h" // 包含摄像头头文件以使用 RtpHeader
 
 namespace ns3 {
 
@@ -75,8 +74,8 @@ void YtyServer::RegisterClientInfo(const Ipv4Address& clientIp, const ClientInfo
                 << ", CamID=" << info.cameraId 
                 << ", Type=" << info.accessType
                 << ", Region=" << info.region
-                // 确认采样器是否被成功传入
-                << ", BitrateSampler ptr=" << info.bitrateSampler);
+                
+                << ", Codec=" << info.codec);
 }
 // ^^^ 新增 ^^^
 
@@ -98,11 +97,10 @@ void YtyServer::StartApplication(void)
     m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
     if (m_logFile.is_open())
     {
-        // +++ 【修改】在日志表头中加入 "DeltaBps" +++
-        m_logFile << "Time(s)\tClientAddr\tThroughput(bps)\tDelay(ms)\tLossRate\tJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion\tCodec\tDeltaBps" << std::endl;
+        m_logFile << "Time(s)\tClientAddr\tThroughput(kbps)\tDelay(ms)\tLossRate\tJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion\tCodec\tAIBandwidth(kbps)\tResolution\tCRF\tActualBitrate(kbps)" << std::endl;
     }
-    
 }
+    
 
 void YtyServer::StopApplication(void)
 {
@@ -128,20 +126,79 @@ void YtyServer::StopApplication(void)
 
 }
 
+
 void YtyServer::HandleRead(Ptr<Socket> socket)
 {
     Ptr<Packet> packet;
     Address from;
     while ((packet = socket->RecvFrom(from)))
     {
-        // 简单地通过包大小来区分RTP和RTSP (这是一种简化，但在本场景下有效)
-        if (packet->GetSize() > 100) // Assume larger packets are RTP
+        // 如果是空包则跳过
+        if (packet->GetSize() == 0) continue;
+
+        // 1. 创建一个临时的包副本（Copy）用于检查
+        Ptr<Packet> packetCopy = packet->Copy();
+        
+        // 2. 尝试从【副本】中解析出我们的自定义RTP头
+        RtpHeader rtpHeader;
+        uint32_t headerSize = packetCopy->RemoveHeader(rtpHeader);
+
+        // 3. 检查头部是否成功解析，并且魔数是否匹配
+        //    如果 headerSize > 0，说明成功解析出了一个头。
+        if (headerSize > 0 && rtpHeader.GetMagic() == 0xAC)
         {
+             // 确认是RTP包，将【原始包】交给RTP处理器
              ProcessRtp(packet, from);
         }
-        else // Assume smaller packets are RTSP
+        else // 4. 如果不是我们定义的RTP包，那它一定是文本控制协议包
         {
-             ProcessRtsp(packet, from);
+            // 从原始包中读取文本内容
+            uint8_t buffer[256]; // 缓冲区给大一点以防万一
+            packet->CopyData(buffer, std::min((uint32_t)255, packet->GetSize()));
+            buffer[std::min((uint32_t)255, packet->GetSize())] = '\0';
+            std::string request(reinterpret_cast<char*>(buffer));
+            
+            // 根据请求的字符串内容进行分发
+            if (request.rfind("PLAY", 0) == 0 || request.rfind("TEARDOWN", 0) == 0) {
+                // 是标准RTSP请求，将【原始包】交给RTSP处理器
+                ProcessRtsp(packet, from);
+            }
+            else if (request.rfind("SET_PARAMS", 0) == 0) {
+                // 是我们自定义的 SET_PARAMS 请求，直接在此处理
+                if (m_sessions.count(from)) {
+                    ClientSession& session = m_sessions[from];
+                    
+                    NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server received SET_PARAMS from " << InetSocketAddress::ConvertFrom(from).GetIpv4());
+
+                    // --- 【核心修正】使用更健壮的解析逻辑 ---
+                    std::istringstream requestStream(request);
+                    std::string line;
+                    while (std::getline(requestStream, line))
+                    {
+                        // 去除行尾的 \r 
+                        if (!line.empty() && line.back() == '\r') {
+                            line.pop_back();
+                        }
+
+                        std::string header_res = "X-Resolution: ";
+                        std::string header_crf = "X-CRF: ";
+                        std::string header_br = "X-Actual-Bitrate: ";
+
+                        if (line.rfind(header_res, 0) == 0) {
+                            session.resolution = line.substr(header_res.length());
+                        }
+                        else if (line.rfind(header_crf, 0) == 0) {
+                            session.crf = std::stoul(line.substr(header_crf.length()));
+                        }
+                        else if (line.rfind(header_br, 0) == 0) {
+                            session.actualBitrate = std::stoul(line.substr(header_br.length()));
+                        }
+                    }
+                }
+            }
+            else {
+                 NS_LOG_WARN("Received an unknown control packet from " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ", content: " << request);
+            }
         }
     }
 }
@@ -321,130 +378,6 @@ void YtyServer::ScheduleReport(const Address& clientAddress)
     }
 }
 
-// 原始的SendRtcpFeedback
-// void YtyServer::SendRtcpFeedback(const Address& clientAddress)
-// {
-//     if (!m_sessions.count(clientAddress)) return;
-
-//     ClientSession& session = m_sessions[clientAddress];
-//     Time now = Simulator::Now();
-
-//     Time interval = now - session.lastReportTime;
-//     if (interval.IsZero())
-//     {
-//         ScheduleReport(clientAddress);
-//         return;
-//     }
-
-//     double throughput = (session.intervalReceivedBytes * 8) / interval.GetSeconds();
-//     Time avgDelay = (session.intervalReceivedPackets > 0) ? session.intervalTotalDelay / session.intervalReceivedPackets : Seconds(0);
-
-//     uint32_t intervalSent = session.maxSeenSentPackets - session.lastReportedSentPackets;
-//     double lossRate = 0.0;
-//     if (intervalSent > 0)
-//     {
-//         uint64_t receivedInInterval = std::min((uint64_t)intervalSent, session.intervalReceivedPackets);
-//         lossRate = 1.0 - (double)receivedInInterval / intervalSent;
-//     }
-//     if (lossRate < 0) lossRate = 0.0;
-
-
-//     // +++ 新增代码段开始：自适应码率衰减因子计算 +++
-//     // 基于您提供的统计数据：
-//     // 平均延迟: ~36ms, 标准差: ~60ms
-//     // 平均丢包: ~1.7%, 标准差: ~5.7%
-//     // 平均抖动: ~3ms, 标准差: ~0.6ms
-
-//     // int penaltyPoints = 0;
-//     // double currentJitterMs = session.jitter * 1000.0; // 将抖动单位转换为毫秒
-
-//     // // 1. 评估延迟
-//     // if (avgDelay.GetMilliSeconds() > 150.0) penaltyPoints += 4; // 非常差
-//     // else if (avgDelay.GetMilliSeconds() > 100.0) penaltyPoints += 2; // 差
-//     // else if (avgDelay.GetMilliSeconds() > 50.0) penaltyPoints += 1;  // 警告
-
-//     // // 2. 评估丢包率
-//     // if (lossRate > 0.1) penaltyPoints += 4;      // 非常差 (>10%)
-//     // else if (lossRate > 0.05) penaltyPoints += 2; // 差 (>5%)
-//     // else if (lossRate > 0.02) penaltyPoints += 1; // 警告 (>2%)
-
-//     // // 3. 评估抖动
-//     // if (currentJitterMs > 20.0) penaltyPoints += 2; // 差
-//     // else if (currentJitterMs > 10.0) penaltyPoints += 1; // 警告
-
-//     // 4. 将惩罚点数映射到衰减因子
-//     double decayFactor = 1.0;
-//     // if (penaltyPoints >= 9) decayFactor = 0.1;
-//     // else if (penaltyPoints == 8) decayFactor = 0.6;
-//     // else if (penaltyPoints == 7) decayFactor = 0.65;
-//     // else if (penaltyPoints == 6) decayFactor = 0.7;
-//     // else if (penaltyPoints == 5) decayFactor = 0.75;
-//     // else if (penaltyPoints == 4) decayFactor = 0.8;
-//     // else if (penaltyPoints == 3) decayFactor = 0.85;
-//     // else if (penaltyPoints == 2) decayFactor = 0.9;
-//     // else if (penaltyPoints == 1) decayFactor = 0.95;
-
-//     // +++ 新增代码段结束 +++
-
-
-//     // 创建并发送RTCP包
-//     // --- 修改代码段开始：将 decayFactor 加入RTCP负载 ---
-//     // 为decayFactor增加了一个double的空间
-//     uint32_t payloadSize = sizeof(double) + sizeof(int64_t) + sizeof(double) + sizeof(double); 
-//     uint8_t* buffer = new uint8_t[payloadSize];
-//     uint32_t offset = 0;
-//     memcpy(buffer + offset, &throughput, sizeof(double));
-//     offset += sizeof(double);
-//     int64_t delay_ns = avgDelay.GetNanoSeconds();
-//     memcpy(buffer + offset, &delay_ns, sizeof(int64_t));
-//     offset += sizeof(int64_t);
-//     memcpy(buffer + offset, &lossRate, sizeof(double));
-//     offset += sizeof(double);
-//     memcpy(buffer + offset, &decayFactor, sizeof(double)); // 将decayFactor加入缓冲区
-//     Ptr<Packet> rtcpPacket = Create<Packet>(buffer, payloadSize);
-//     delete[] buffer;
-//     // --- 修改代码段结束 ---
-//     m_socket->SendTo(rtcpPacket, 0, clientAddress);
-
-//     // 在日志中增加对新因子的记录
-//     NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4()
-//             << ": IntervalThroughput=" << throughput << " bps, IntervalAvgDelay=" << avgDelay.GetMilliSeconds() << " ms, IntervalLossRate=" << lossRate
-//             << ", DecayFactor=" << decayFactor);
-
-//     // ▼▼▼ 【新增】为日志记录累加抖动值 ▼▼▼
-//     session.logIntervalSumThroughput += throughput;
-//     session.logIntervalSumDelay += avgDelay;
-//     session.logIntervalSumLossRate += lossRate;
-//     session.logIntervalSumJitter += session.jitter; // 累加当前计算的抖动值
-//     session.logIntervalRtcpCount++;
-//     // ▲▲▲ 【新增】为日志记录累加抖动值 ▲▲▲
-
-
-//     // ▼▼▼ 添加调试日志 ▼▼▼
-//     // NS_LOG_INFO("--- DEBUG --- "
-//     //             << "Time: " << now.GetSeconds() << "s, "
-//     //             << "Client: " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << ", "
-//     //             << "TotalDelay before reset: " << session.intervalTotalDelay.GetMilliSeconds() << "ms, "
-//     //             << "Packets in interval: " << session.intervalReceivedPackets);
-//     // ▲▲▲ 添加调试日志 ▲▲▲
-
-//     // ▼▼▼ 【新增】为日志记录累加RTCP统计信息 ▼▼▼
-//     session.logIntervalSumThroughput += throughput;
-//     session.logIntervalSumDelay += avgDelay;
-//     session.logIntervalSumLossRate += lossRate;
-//     session.logIntervalRtcpCount++;
-//     // ▲▲▲ 【新增】为日志记录累加RTCP统计信息 ▲▲▲
-    
-//     // 【至关重要】重置周期统计变量，并更新状态
-//     session.intervalReceivedPackets = 0;
-//     session.intervalReceivedBytes = 0;
-//     session.intervalTotalDelay = Seconds(0);
-//     session.lastReportedSentPackets = session.maxSeenSentPackets;
-//     session.lastReportTime = now;
-
-//     ScheduleReport(clientAddress);
-// }
-
 
 void YtyServer::SendRtcpFeedback(const Address& clientAddress)
 {
@@ -471,26 +404,28 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     }
     if (lossRate < 0) lossRate = 0.0;
 
-    // --- 2. 【核心修改】调用AI模块获取码率 ---
+    // --- 2. 调用AI模块获取可用带宽 ---
     double throughputKbps = throughputBps / 1000.0;
-    uint32_t targetBitrate = GetBitrateFromAI(session, throughputKbps, avgDelay, lossRate);
+    uint32_t aiBandwidth = GetBitrateFromAI(session, throughputKbps, avgDelay, lossRate);
 
-    // --- 3. 【核心修改】将新的目标码率发送回摄像头 ---
-    Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&targetBitrate), sizeof(uint32_t));
+    // +++ 【新增】将AI给出的带宽建议存入会话，以便日志记录 +++
+    session.aiBandwidth = aiBandwidth;
+
+    // --- 3. 将服务器计算出的【可用带宽】发送回摄像头 ---
+    Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&aiBandwidth), sizeof(uint32_t));
+
     m_socket->SendTo(rtcpPacket, 0, clientAddress);
 
-    NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to "
-            << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4()
-            << " with AI-chosen target bitrate: " << targetBitrate << " bps");
+    // NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << " with available bandwidth: " << aiBandwidth << " bps");
 
-    // ▼▼▼ 【【【修复的关键代码】】】 ▼▼▼
+
+
     // 将当前计算出的指标累加到日志统计变量中
     session.logIntervalSumThroughput += throughputBps;
     session.logIntervalSumDelay += avgDelay;
     session.logIntervalSumLossRate += lossRate;
     session.logIntervalSumJitter += session.jitter; // 累加当前计算的抖动值
     session.logIntervalRtcpCount++;
-    // ▲▲▲ 【【【修复的关键代码】】】 ▲▲▲
 
 
     // --- 4. 重置周期统计数据 (与之前相同) ---
@@ -599,6 +534,16 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     if (!m_sessions.count(clientAddress)) return;
 
     ClientSession& session = m_sessions[clientAddress];
+
+    // +++ 【新增】有效性检查：如果参数仍为初始默认值，则不记录本次日志，直接调度下一次 +++
+    if (session.resolution == "N/A")
+    {
+        // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, 跳过日志 " 
+        //             << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() 
+        //             << " 因为参数还没更新.");
+        ScheduleLog(clientAddress); // 直接调度下一次日志事件
+        return; // 结束本次函数调用
+    }
     
     // --- 计算播放统计 ---
     double stutterRate = 0;
@@ -623,32 +568,27 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     }
     // ▲▲▲ 【新增】计算包括抖动在内的各项指标平均值 ▲▲▲
 
-    // +++ 【新增】计算 delta-btr 的平均值 +++
-    int64_t avgDeltaBps = 0;
-    if (session.logIntervalDeltaCount > 0)
-    {
-        avgDeltaBps = session.logIntervalSumDeltaBitrate / session.logIntervalDeltaCount;
-    }
-
-    // ▼▼▼ 【修改】将 DeltaBps 写入日志文件 ▼▼▼
+    // --- 【核心修改】将新的编码参数写入日志文件 ---
     if (m_logFile.is_open())
     {
         m_logFile << Simulator::Now().GetSeconds() << "\t"
-                  << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << "\t"
-                  << avgThroughput << "\t"
-                  << avgDelayMs << "\t"
-                  << avgLossRate << "\t"
-                  << avgJitterMs << "\t" // 在丢包率后插入抖动值
-                  << session.playedFrames << "\t"
-                  << session.stutterEvents << "\t"
-                  << stutterRate << "\t"
-                  << session.clientInfo.cameraId << "\t"
-                  << session.clientInfo.accessType << "\t"
-                  << session.clientInfo.region << "\t"
-                  << session.clientInfo.codec << "\t"
-                  << avgDeltaBps << std::endl; // 写入码率差值
+                  << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << "\t" // ClientAddr
+                  << avgThroughput / 1000 << "\t"      // Throughput(kbps)
+                  << avgDelayMs << "\t"                 // Delay(ms)
+                  << avgLossRate << "\t"                // LossRate
+                  << avgJitterMs << "\t"                // Jitter(ms)
+                  << session.playedFrames << "\t"       // PlayedFrames
+                  << session.stutterEvents << "\t"      // StutterEvents
+                  << stutterRate << "\t"                 // StutterRate
+                  << session.clientInfo.cameraId << "\t"  // CameraId
+                  << session.clientInfo.accessType << "\t"// AccessType
+                  << session.clientInfo.region << "\t"    // Region
+                  << session.clientInfo.codec << "\t"     // Codec
+                  << session.aiBandwidth / 1000 << "\t"   // AIBandwidth(kbps)
+                  << session.resolution << "\t"           // Resolution
+                  << session.crf << "\t"                  // CRF
+                  << session.actualBitrate / 1000 << std::endl; // ActualBitrate(kbps)
     }
-    // ▲▲▲ 【修改】将抖动值写入日志文件 ▲▲▲
     
     // --- 为下一个统计周期重置所有日志相关的统计量 ---
     session.playedFrames = 0;
@@ -662,19 +602,16 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     session.logIntervalRtcpCount = 0;
     // ▲▲▲ 【新增】重置所有日志相关的统计量，包括抖动 ▲▲▲
 
-    // +++ 【新增】重置 delta-btr 的累加器 +++
-    session.logIntervalSumDeltaBitrate = 0;
-    session.logIntervalDeltaCount = 0;
 
     // 安排下一次日志事件
     ScheduleLog(clientAddress);
 }
 
 
-// +++ 【修正版】GetBitrateFromAI 函数 +++
-uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double throughputKbps, Time delay, double lossRate)
+// --- 【核心修改】移除 Sampled Bps 和 Delta Bps 相关逻辑 ---
+uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double bandwidthKbps, Time delay, double lossRate)
 {
-    // 默认码率，如果AI通信失败则使用
+    // 默认带宽，如果AI通信失败则使用
     const uint32_t DEFAULT_BITRATE = 1000000; // 1 Mbps
     // 1. 将目标码率初始化为默认值
     uint32_t targetBitrate = DEFAULT_BITRATE;
@@ -688,7 +625,7 @@ uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double throughputKb
         // 2. 构建JSON请求
         nlohmann::json request_json;
         request_json["cameraId"] = session.clientInfo.cameraId;
-        request_json["throughputKbps"] = throughputKbps;
+        request_json["throughputKbps"] = bandwidthKbps;
         request_json["delayMs"] = delay.GetMilliSeconds();
         request_json["lossRate"] = lossRate;
         
@@ -723,29 +660,10 @@ uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double throughputKb
         }
     }
 
-    // 6. 【统一计算差值】无论码率从何而来（AI或默认），都在这里计算与原始采样的差值
-    if (session.clientInfo.bitrateSampler)
-    {
-        uint32_t originalSampledBitrate = session.clientInfo.bitrateSampler->Sample();
-        int64_t delta = static_cast<int64_t>(targetBitrate) - static_cast<int64_t>(originalSampledBitrate);
-        
-        // 累加到日志统计变量中
-        session.logIntervalSumDeltaBitrate += delta;
-        session.logIntervalDeltaCount++;
-
-        NS_LOG_INFO("Camera " << session.clientInfo.cameraId 
-                    << ": AI/Target Bitrate=" << targetBitrate 
-                    << " bps, Original Sampled Bitrate=" << originalSampledBitrate 
-                    << " bps, Delta=" << delta << " bps");
-    }
-    else
-    {
-        NS_LOG_WARN("未找到摄像头 " << session.clientInfo.cameraId << " 的码率采样器，无法计算差值。");
-    }
     
     // 7. 【统一返回】在函数末尾统一返回最终确定的目标码率
     return targetBitrate;
 }
 
-
-} // namespace ns3
+}
+// namespace ns3

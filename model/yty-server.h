@@ -8,11 +8,8 @@
 #include "ns3/ptr.h"
 #include "ns3/address.h"
 #include "ns3/traced-callback.h"
-#include "yty-camera.h"
-#include "ns3/ipv4-address.h"
 
-// +++ 【新增】包含 BitrateSampler 头文件 +++
-#include "yty-bitrate-sampler.h"
+#include "ns3/ipv4-address.h"
 
 #include <map>
 #include <vector>
@@ -26,8 +23,6 @@ namespace ns3 {
 
 class Socket;
 class Packet;
-// +++ 【新增】前向声明 BitrateSampler 类 +++
-class BitrateSampler;
 
 
 /**
@@ -52,12 +47,8 @@ public:
         std::string region;
         std::string codec;
 
-        // +++ 【新增】用于存储从脚本传入的采样器实例 +++
-        Ptr<BitrateSampler> bitrateSampler; 
-
-        ClientInfo() : cameraId(0), accessType("Unknown"), region("Unknown"), codec("Unknown"), bitrateSampler(nullptr) {} // <<< 【修改】构造函数初始化
-        ClientInfo(uint32_t id, std::string type, std::string reg, std::string c, Ptr<BitrateSampler> sampler) // <<< 【修改】构造函数
-        : cameraId(id), accessType(type), region(reg), codec(c), bitrateSampler(sampler) {}
+        ClientInfo() : cameraId(0), accessType("Unknown"), region("Unknown"), codec("Unknown") {}
+        ClientInfo(uint32_t id, std::string type, std::string reg, std::string c) : cameraId(id), accessType(type), region(reg), codec(c) {}
     };
 
     /**
@@ -133,16 +124,13 @@ private:
         // 直接包含一个ClientInfo结构体 VVV
         ClientInfo clientInfo;
 
-
-        // ZMQ相关的成员
-        // 指向与该客户端通信的ZMQ socket的智能指针
         std::unique_ptr<zmq::socket_t> zmq_socket;
 
-
-        // +++ VVV 【新增】delta-btr 相关成员 +++
-        int64_t  logIntervalSumDeltaBitrate; // 日志周期内，（AI码率 - 采样码率）的总和
-        uint32_t logIntervalDeltaCount;      // 日志周期内，差值计算的次数
-        // +++ ^^^ 【新增】delta-btr 相关成员 ^^^ +++
+        // --- 【核心修改】新增用于存储和记录新编码参数的变量 ---
+        std::string resolution;
+        uint32_t    crf;
+        uint32_t    actualBitrate; // 单位: bps
+        uint32_t    aiBandwidth;   // +++ 【新增】存储AI给出的建议带宽 (bps) +++
 
 
 
@@ -177,10 +165,12 @@ private:
            
             zmq_socket(nullptr), // <<< 新增: 初始化为空指针
 
-            // +++ VVV 【新增】初始化 delta-btr 相关成员 +++
-            logIntervalSumDeltaBitrate(0),
-            logIntervalDeltaCount(0)
-            // +++ ^^^ 【新增】初始化 delta-btr 相关成员 ^^^ +++
+            // --- 【核心修改】初始化新成员 ---
+            resolution("N/A"),
+            crf(0),
+            actualBitrate(0),
+            aiBandwidth(0) // 初始化为0
+            
             
         {
         }
