@@ -97,7 +97,7 @@ void YtyServer::StartApplication(void)
     m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
     if (m_logFile.is_open())
     {
-        m_logFile << "Time(s)\tClientAddr\tThroughput(kbps)\tDelay(ms)\tLossRate\tJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion\tCodec\tAIBandwidth(kbps)\tResolution\tCRF\tActualBitrate(kbps)" << std::endl;
+        m_logFile << "Time(s)\tClientAddr\tThroughput(kbps)\tAvgDelay(ms)\tAvgLossRate\tAvgJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion\tCodec\tAIBandwidth(kbps)\tResolution\tCRF\tActualBitrate(kbps)" << std::endl;
     }
 }
     
@@ -218,8 +218,11 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
     // 这确保了日志只在数据真实流动后才开始，消除了初始的零值垃圾数据。
     if (!session.loggingStarted)
     {
-        NS_LOG_INFO("First RTP packet received from " << InetSocketAddress::ConvertFrom(from).GetIpv4() 
-                    << ". Starting periodic logging for this session.");
+        // NS_LOG_INFO("First RTP packet received from " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ". Starting periodic logging for this session.");
+
+        // +++ 当日志首次启动时，记录当前时间作为日志周期的起点 +++
+        session.logIntervalStartTime = Simulator::Now();
+
         ScheduleLog(from);          // 启动日志记录循环
         session.loggingStarted = true; // 设置标志，防止重复启动
     }
@@ -239,6 +242,9 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
     session.intervalReceivedPackets++;
     session.intervalReceivedBytes += packetSize;
     session.intervalTotalDelay += delay;
+
+    session.logIntervalReceivedBytes += packetSize;
+
     uint32_t cumulativeSentCount = rtpHeader.GetTotalPackets();
     if (cumulativeSentCount > session.maxSeenSentPackets) {
         session.maxSeenSentPackets = cumulativeSentCount;
@@ -411,7 +417,6 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     }
 
     // --- 1. 计算网络状态 (与之前相同) ---
-    double throughputBps = (session.intervalReceivedBytes * 8) / interval.GetSeconds();
     Time avgDelay = (session.intervalReceivedPackets > 0) ? session.intervalTotalDelay / session.intervalReceivedPackets : Seconds(0);
     uint32_t intervalSent = session.maxSeenSentPackets - session.lastReportedSentPackets;
     double lossRate = 0.0;
@@ -423,10 +428,9 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     if (lossRate < 0) lossRate = 0.0;
 
     // --- 2. 调用AI模块获取可用带宽 ---
-    double throughputKbps = throughputBps / 1000.0;
-    uint32_t aiBandwidth = GetBitrateFromAI(session, throughputKbps, avgDelay, lossRate);
+    uint32_t aiBandwidth = GetBitrateFromAI(session, session.lastThroughputKbpsForAI, avgDelay, lossRate);
 
-    // +++ 【新增】将AI给出的带宽建议存入会话，以便日志记录 +++
+    // +++ 将AI给出的带宽建议存入会话，以便日志记录 +++
     session.aiBandwidth = aiBandwidth;
 
     // --- 3. 将服务器计算出的【可用带宽】发送回摄像头 ---
@@ -434,12 +438,8 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
 
     m_socket->SendTo(rtcpPacket, 0, clientAddress);
 
-    // NS_LOG_INFO("At time " << now.GetSeconds() << "s, Server sent RTCP to " << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << " with available bandwidth: " << aiBandwidth << " bps");
-
-
 
     // 将当前计算出的指标累加到日志统计变量中
-    session.logIntervalSumThroughput += throughputBps;
     session.logIntervalSumDelay += avgDelay;
     session.logIntervalSumLossRate += lossRate;
     session.logIntervalSumJitter += session.jitter; // 累加当前计算的抖动值
@@ -555,36 +555,45 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     
     // --- 计算播放统计 ---
     double stutterRate = 0;
-    // 分母是总的尝试播放帧数（已播放的 + 卡顿跳过的）
     if ((session.playedFrames + session.stutterEvents) > 0)
     {
         stutterRate = static_cast<double>(session.stutterEvents) / (session.playedFrames + session.stutterEvents);
     }
 
-    // ▼▼▼ 【新增】计算包括抖动在内的各项指标平均值 ▼▼▼
-    double avgThroughput = 0.0;
+    // --- 在此统一计算1秒日志周期的各项指标 ---
+    Time logIntervalDuration = Simulator::Now() - session.logIntervalStartTime;
+    double throughputKbps = 0.0;
+    // 确保时长大于0，避免除零错误
+    if (logIntervalDuration.GetSeconds() > 0)
+    {
+        // 计算吞吐量，单位是 Kbps
+        // (字节 * 8.0) -> 比特; (/ 时长) -> bps; (/ 1000.0) -> Kbps
+        throughputKbps = (session.logIntervalReceivedBytes * 8.0) / logIntervalDuration.GetSeconds() / 1000.0;
+    }
+    // 更新供AI模块使用的缓存值
+    session.lastThroughputKbpsForAI = 2000;
+
+    // 计算其他指标的平均值
     double avgDelayMs = 0.0;
     double avgLossRate = 0.0;
-    double avgJitterMs = 0.0; // 抖动平均值，单位毫秒
-
+    double avgJitterMs = 0.0;
     if (session.logIntervalRtcpCount > 0)
     {
-        avgThroughput = session.logIntervalSumThroughput / session.logIntervalRtcpCount;
         avgDelayMs = (session.logIntervalSumDelay.GetMilliSeconds()) / session.logIntervalRtcpCount;
         avgLossRate = session.logIntervalSumLossRate / session.logIntervalRtcpCount;
         avgJitterMs = (session.logIntervalSumJitter / session.logIntervalRtcpCount) * 1000.0; // 转换为毫秒
     }
-    // ▲▲▲ 【新增】计算包括抖动在内的各项指标平均值 ▲▲▲
 
-    // --- 【核心修改】将新的编码参数写入日志文件 ---
+    // --- 【核心修正】将计算好的各项指标写入日志文件 ---
     if (m_logFile.is_open())
     {
         m_logFile << Simulator::Now().GetSeconds() << "\t"
                   << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << "\t" // ClientAddr
-                  << avgThroughput / 1000 << "\t"      // Throughput(kbps)
-                  << avgDelayMs << "\t"                 // Delay(ms)
-                  << avgLossRate << "\t"                // LossRate
-                  << avgJitterMs << "\t"                // Jitter(ms)
+                  // ▼▼▼ 请确认此行代码 ▼▼▼
+                  << throughputKbps << "\t"             // Throughput(kbps) - 直接使用已是Kbps单位的变量，无需再除1000
+                  << avgDelayMs << "\t"                 // AvgDelay(ms)
+                  << avgLossRate << "\t"                // AvgLossRate
+                  << avgJitterMs << "\t"                // AvgJitter(ms)
                   << session.playedFrames << "\t"       // PlayedFrames
                   << session.stutterEvents << "\t"      // StutterEvents
                   << stutterRate << "\t"                 // StutterRate
@@ -598,18 +607,15 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
                   << session.actualBitrate / 1000 << std::endl; // ActualBitrate(kbps)
     }
     
-    // --- 为下一个统计周期重置所有日志相关的统计量 ---
+    // --- 为下一个日志周期重置所有相关的统计量 ---
     session.playedFrames = 0;
     session.stutterEvents = 0;
-
-    // ▼▼▼ 【新增】重置所有日志相关的统计量，包括抖动 ▼▼▼
-    session.logIntervalSumThroughput = 0.0;
     session.logIntervalSumDelay = Seconds(0);
     session.logIntervalSumLossRate = 0.0;
-    session.logIntervalSumJitter = 0.0; // 重置抖动累加器
+    session.logIntervalSumJitter = 0.0;
     session.logIntervalRtcpCount = 0;
-    // ▲▲▲ 【新增】重置所有日志相关的统计量，包括抖动 ▲▲▲
-
+    session.logIntervalReceivedBytes = 0;
+    session.logIntervalStartTime = Simulator::Now();
 
     // 安排下一次日志事件
     ScheduleLog(clientAddress);

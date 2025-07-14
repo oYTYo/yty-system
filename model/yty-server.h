@@ -111,16 +111,22 @@ private:
         double   jitter;                // 计算出的抖动值 (单位: 秒)
      
 
-        // ▼▼▼ 用于日志记录的RTCP指标累加器 ▼▼▼
-        double   logIntervalSumThroughput; // 日志周期内，吞吐率的总和
+        // 用于日志记录的RTCP指标累加器
         Time     logIntervalSumDelay;      // 日志周期内，延迟的总和
         double   logIntervalSumLossRate;   // 日志周期内，丢包率的总和
         uint32_t logIntervalRtcpCount;     // 日志周期内，收到的RTCP包数量
 
 
-        // --- VVV 新增：用于抖动日志的累加器 VVV ---
+        // 用于抖动日志的累加器
         double   logIntervalSumJitter;      // 日志周期内，抖动的总和
-     
+
+        // 为1秒日志周期独立统计字节数
+        uint64_t logIntervalReceivedBytes;  // 日志周期内收到的总字节数
+        Time     logIntervalStartTime;      // 日志周期的开始时间
+        
+        // 用于缓存吞吐量供AI模块使用
+        double   lastThroughputKbpsForAI;   // 上次计算出的吞-吐量(kbps)，供AI使用
+
 
         // 直接包含一个ClientInfo结构体 VVV
         ClientInfo clientInfo;
@@ -158,7 +164,7 @@ private:
           
 
             // 初始化新增的成员变量
-            logIntervalSumThroughput(0.0),
+            // logIntervalSumThroughput(0.0),
             logIntervalSumDelay(Seconds(0)),
             logIntervalSumLossRate(0.0),
             logIntervalRtcpCount(0),
@@ -166,6 +172,10 @@ private:
 
             // --- 初始化抖动累加器---
             logIntervalSumJitter(0.0),
+
+            logIntervalReceivedBytes(0),
+            logIntervalStartTime(Seconds(0)),
+            lastThroughputKbpsForAI(0.0),
            
             zmq_socket(nullptr),
 
