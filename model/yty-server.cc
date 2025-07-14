@@ -37,7 +37,7 @@ TypeId YtyServer::GetTypeId(void)
                       MakeUintegerAccessor(&YtyServer::m_port),
                       MakeUintegerChecker<uint16_t>())
         .AddAttribute("ReportInterval", "Interval for sending RTCP reports.",
-                      TimeValue(MilliSeconds(50)),
+                      TimeValue(MilliSeconds(100)),
                       MakeTimeAccessor(&YtyServer::m_reportInterval),
                       MakeTimeChecker())
         // 为日志记录添加新属性
@@ -194,15 +194,6 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
                             session.actualBitrate = std::stoul(line.substr(header_br.length()));
                         }
                     }
-
-                    // +++ 触发式日志启动逻辑 VVV +++
-                    // 如果日志尚未为该会话启动，并且我们已收到有效分辨率
-                    if (!session.loggingStarted && session.resolution != "N/A")
-                    {
-                        // NS_LOG_INFO("Parameters confirmed for " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ". Starting periodic logging.");
-                        ScheduleLog(from);          // 启动日志记录循环
-                        session.loggingStarted = true; // 设置标志，防止重复启动
-                    }
                    
                 }
             }
@@ -223,6 +214,16 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
     }
     
     ClientSession& session = m_sessions[from];
+
+    // 这确保了日志只在数据真实流动后才开始，消除了初始的零值垃圾数据。
+    if (!session.loggingStarted)
+    {
+        NS_LOG_INFO("First RTP packet received from " << InetSocketAddress::ConvertFrom(from).GetIpv4() 
+                    << ". Starting periodic logging for this session.");
+        ScheduleLog(from);          // 启动日志记录循环
+        session.loggingStarted = true; // 设置标志，防止重复启动
+    }
+
     uint32_t packetSize = packet->GetSize();
     Time now = Simulator::Now();
 

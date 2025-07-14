@@ -119,26 +119,26 @@ void YtyCamera::StartApplication(void)
     m_codecSimulator = std::make_unique<YtyCodecSimulator>(m_codec);
 
     if (m_codec == "H.264") {
-        m_resolution = "1280x720";
+        m_resolution = "854x480";
         m_frameRate = 30;
-        m_crf = 26;
+        m_crf = 24;
         // 根据这个初始配置，查找一个初始的实际码率
-        EncodingParams params = m_codecSimulator->FindBestParams(2000, m_resolution, m_frameRate, 0); // 假设初始带宽2Mbps
+        EncodingParams params = m_codecSimulator->FindBestParams(869, m_resolution, m_frameRate, 0); // 假设初始带宽2Mbps
         if (params.found) {
             m_actualBitrate = params.actual_bitrate_kbps * 1000;
         } else {
             m_actualBitrate = 1000000; // 备用值
         }
     } else { // H.265
-        m_resolution = "1920x1080";
+        m_resolution = "1280x720";
         m_frameRate = 30;
         m_crf = 28;
         // 根据这个初始配置，查找一个初始的实际码率
-        EncodingParams params = m_codecSimulator->FindBestParams(2000, m_resolution, m_frameRate, 0); // 假设初始带宽2Mbps
+        EncodingParams params = m_codecSimulator->FindBestParams(873, m_resolution, m_frameRate, 0); // 假设初始带宽2Mbps
         if (params.found) {
             m_actualBitrate = params.actual_bitrate_kbps * 1000;
         } else {
-            m_actualBitrate = 1500000; // 备用值
+            m_actualBitrate = 1000000; // 备用值
         }
     }
     // NS_LOG_INFO("Camera " << m_cameraId << " (" << m_codec << ") initialized with Res: " << m_resolution << ", FPS: " << m_frameRate << ", CRF: " << m_crf << ", initial Bitrate: " << m_actualBitrate / 1000 << "kbps");
@@ -161,9 +161,6 @@ void YtyCamera::StartApplication(void)
     
     // SendRtspRequest("PLAY");
     SendPlayRequestAndScheduleRetry();
-
-    m_encoderEvent = Simulator::ScheduleNow(&YtyCamera::Encoder, this);
-    m_sendEvent = Simulator::ScheduleNow(&YtyCamera::SendPacket, this);
 }
 
 
@@ -209,8 +206,8 @@ void YtyCamera::Encoder(void)
     }
     
     // 使用由 CodecSimulator 决定的真实码率
-    uint32_t frameSize = m_actualBitrate / m_frameRate;
-    uint32_t numPacketsInFrame = (frameSize + m_packetSize - 1) / m_packetSize;
+    uint32_t frameSizeBytes = m_actualBitrate / (8 * m_frameRate);
+    uint32_t numPacketsInFrame = (frameSizeBytes + m_packetSize - 1) / m_packetSize;
 
     for (uint32_t i = 0; i < numPacketsInFrame; ++i)
     {
@@ -418,7 +415,7 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
             double random_delay = CreateObject<UniformRandomVariable>()->GetValue(0.01, 0.05);
             Simulator::Schedule(Seconds(random_delay), &YtyCamera::UpdateEncodingParameters, this, receivedBandwidth);
 
-            // 如果这是第一条有效反馈，则激活会话并停止PLAY重试 +++
+            // 如果这是第一条有效反馈，则激活会话、停止PLAY重试，并启动编码器
             if (!m_sessionActive)
             {
                 NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera " << m_cameraId 
@@ -428,6 +425,12 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
                 {
                     Simulator::Cancel(m_rtspRetryEvent);
                 }
+
+                // <<< 在这里启动编码器和发送事件！ >>>
+                // 只有在收到服务器的第一条指令后，才开始真正地编码和发送视频数据。
+                // 这确保了摄像头不会在网络拥堵时盲目地发送数据。
+                m_encoderEvent = Simulator::ScheduleNow(&YtyCamera::Encoder, this);
+                m_sendEvent = Simulator::ScheduleNow(&YtyCamera::SendPacket, this);
             }
         }
         else 
