@@ -10,7 +10,7 @@ set(SOURCE_FILES
   helper/yty-server-helper.cc
   model/yty-camera.cc
   model/yty-server.cc
-  # model/yty-bitrate-sampler.cc
+  model/yty-bitrate-sampler.cc
   model/yty-codec-simulator.cc
 )
 
@@ -19,7 +19,7 @@ set(HEADER_FILES
   helper/yty-server-helper.h
   model/yty-camera.h
   model/yty-server.h
-  # model/yty-bitrate-sampler.h
+  model/yty-bitrate-sampler.h
   model/yty-codec-simulator.h
 )
 

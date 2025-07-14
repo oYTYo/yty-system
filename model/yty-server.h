@@ -103,6 +103,7 @@ private:
         uint32_t playedFrames;          // 当前1秒周期内播放的总帧数
         uint32_t stutterEvents;         // 当前1秒周期内的总卡顿次数
         EventId  logStatsEvent;         // 触发日志记录的事件
+        bool     loggingStarted;
 
         // --- 用于抖动计算的状态变量 VVV ---
         Time     lastArrivalTime;       // 上一个RTP包的到达时间
@@ -147,6 +148,9 @@ private:
             frameRate(30), // 给一个默认值, 以防协商失败
             playedFrames(0),
             stutterEvents(0),
+
+            loggingStarted(false),
+            
             // --- 初始化新增的抖动相关成员变量 ---
             lastArrivalTime(Seconds(0)),
             lastSentTime(Seconds(0)),
@@ -163,7 +167,7 @@ private:
             // --- 初始化抖动累加器---
             logIntervalSumJitter(0.0),
            
-            zmq_socket(nullptr), // <<< 新增: 初始化为空指针
+            zmq_socket(nullptr),
 
             // --- 【核心修改】初始化新成员 ---
             resolution("N/A"),

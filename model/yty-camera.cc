@@ -376,6 +376,7 @@ void YtyCamera::SendPlayRequestAndScheduleRetry()
     }
 
     SendRtspRequest("PLAY"); // 发送PLAY请求
+    SendEncodingParams();    // <<< 新增：同时重新发送编码参数
     
     // 安排1秒后再次尝试
     m_rtspRetryEvent = Simulator::Schedule(Seconds(1.0), &YtyCamera::SendPlayRequestAndScheduleRetry, this);

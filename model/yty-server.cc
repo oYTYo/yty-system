@@ -168,7 +168,7 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
                 if (m_sessions.count(from)) {
                     ClientSession& session = m_sessions[from];
                     
-                    NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server received SET_PARAMS from " << InetSocketAddress::ConvertFrom(from).GetIpv4());
+                    // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server received SET_PARAMS from " << InetSocketAddress::ConvertFrom(from).GetIpv4());
 
                     // --- 【核心修正】使用更健壮的解析逻辑 ---
                     std::istringstream requestStream(request);
@@ -194,6 +194,16 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
                             session.actualBitrate = std::stoul(line.substr(header_br.length()));
                         }
                     }
+
+                    // +++ 触发式日志启动逻辑 VVV +++
+                    // 如果日志尚未为该会话启动，并且我们已收到有效分辨率
+                    if (!session.loggingStarted && session.resolution != "N/A")
+                    {
+                        // NS_LOG_INFO("Parameters confirmed for " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ". Starting periodic logging.");
+                        ScheduleLog(from);          // 启动日志记录循环
+                        session.loggingStarted = true; // 设置标志，防止重复启动
+                    }
+                   
                 }
             }
             else {
@@ -325,7 +335,7 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
                     }
 
                     // 如果帧率发生变化，则立即重置播放调度
-                    if (session.playbackEvent.IsRunning() && negotiatedRate > 0)
+                    if (session.playbackEvent.IsPending() && negotiatedRate > 0)
                     {
                         // 如果播放事件正在运行（意味着这不是第一次PLAY），并且我们收到了一个有效的新帧率
                         NS_LOG_INFO("Frame rate changed for " << clientIp << ". Rescheduling playback event.");
@@ -361,7 +371,6 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
 
             // --- 启动播放和日志记录 ---
             SchedulePlayback(from);
-            ScheduleLog(from);
         }
         ScheduleReport(from);
     }
@@ -542,16 +551,6 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     if (!m_sessions.count(clientAddress)) return;
 
     ClientSession& session = m_sessions[clientAddress];
-
-    // +++ 【新增】有效性检查：如果参数仍为初始默认值，则不记录本次日志，直接调度下一次 +++
-    if (session.resolution == "N/A")
-    {
-        // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, 跳过日志 " 
-        //             << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() 
-        //             << " 因为参数还没更新.");
-        ScheduleLog(clientAddress); // 直接调度下一次日志事件
-        return; // 结束本次函数调用
-    }
     
     // --- 计算播放统计 ---
     double stutterRate = 0;
