@@ -96,7 +96,7 @@ private:
     virtual void StartApplication(void);
     virtual void StopApplication(void);
 
-    // +++ 【新增】新的私有方法，用于处理码率决策和参数上报 +++
+    // 现在这个方法负责处理所有参数更新的复杂逻辑
     void UpdateEncodingParameters(uint32_t bandwidthBps);
     void SendEncodingParams();
 
@@ -112,6 +112,7 @@ private:
     Address m_peerAddress;
     uint16_t m_peerPort;
 
+    // 帧率现在是动态可变的
     uint32_t m_frameRate;
     uint32_t m_packetSize;
     DataRate m_sendRate;
@@ -128,11 +129,11 @@ private:
     uint32_t m_cameraId; // 摄像头的唯一ID
 
 
-    void SendPlayRequestAndScheduleRetry(); // 新增一个方法声明
-    bool m_sessionActive;      // <<< 新增: 标记会话是否已激活
-    EventId m_rtspRetryEvent;  // <<< 新增: 用于RTSP PLAY重试的事件
+    void SendPlayRequestAndScheduleRetry();
+    bool m_sessionActive;      // 标记会话是否已激活
+    EventId m_rtspRetryEvent;  // 用于RTSP PLAY重试的事件
 
-    // --- 【核心修改】用我们新的编码器模拟器和参数变量替代旧的逻辑 ---
+    // 核心参数变量
     std::unique_ptr<YtyCodecSimulator> m_codecSimulator; // 编码器模拟器实例
     std::string m_codec;        // 编码器类型 (H.264/H.265)
     std::string m_resolution;   // 当前分辨率
@@ -141,6 +142,11 @@ private:
     // 这个变量现在存储由 CodecSimulator 决定的【真实】码率
     uint32_t m_actualBitrate;
 
+    // 用于智能分辨率切换的决策压力系统
+    int32_t m_increaseResPressure;  // 提升分辨率的压力值
+    int32_t m_decreaseResPressure;  // 降低分辨率的压力值
+    const int32_t m_pressureThreshold; // 触发切换的压力阈值
+    const int32_t m_pressureRecoveryRate; // 压力值的自然恢复速率
 
 };
 

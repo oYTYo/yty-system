@@ -13,6 +13,7 @@
 #include "ns3/boolean.h" // <<< 新增：包含布尔值头文件
 #include "ns3/string.h"
 #include <sstream>
+#include "ns3/random-variable-stream.h" 
 
 
 namespace ns3 {
@@ -58,7 +59,8 @@ TypeId YtyCamera::GetTypeId(void)
         .SetParent<Application>()
         .SetGroupName("Applications")
         .AddConstructor<YtyCamera>()
-        .AddAttribute("FrameRate", "The encoding frame rate in fps.", UintegerValue(30), MakeUintegerAccessor(&YtyCamera::m_frameRate), MakeUintegerChecker<uint32_t>())
+        // 帧率属性现在只是一个初始值，后面会动态改变
+        .AddAttribute("FrameRate", "The initial encoding frame rate in fps.", UintegerValue(30), MakeUintegerAccessor(&YtyCamera::m_frameRate), MakeUintegerChecker<uint32_t>())
         .AddAttribute("PacketSize", "The size of packets sent.", UintegerValue(1400), MakeUintegerAccessor(&YtyCamera::m_packetSize), MakeUintegerChecker<uint32_t>())
         .AddAttribute("RemoteAddress", "The destination address of the outbound packets", AddressValue(), MakeAddressAccessor(&YtyCamera::m_peerAddress), MakeAddressChecker())
         .AddAttribute("RemotePort", "The destination port of the outbound packets", UintegerValue(9), MakeUintegerAccessor(&YtyCamera::m_peerPort), MakeUintegerChecker<uint16_t>())
@@ -75,13 +77,13 @@ YtyCamera::YtyCamera()
       m_frameSeqCounter(0),
       m_cumulativePacketsSent(0),
       m_cameraId(0),
-      m_sessionActive(false), // <<< 新增: 初始化会话状态为未激活
+      m_sessionActive(false), // 初始化会话状态为未激活
 
-      // --- 【核心修改】初始化新的参数 ---
-      m_codec("H.264"),
-      m_resolution("640x480"), // 给一个初始的默认值
-      m_crf(23),              // 给一个初始的默认值
-      m_actualBitrate(500000) // 初始码率 500kbps
+      // 将压力系统相关的常量和变量初始化
+      m_increaseResPressure(0),
+      m_decreaseResPressure(0),
+      m_pressureThreshold(100), // 设定一个阈值，例如100
+      m_pressureRecoveryRate(10) // 设定一个恢复速率，例如每次降低10
 
 {
     NS_LOG_FUNCTION(this);
@@ -112,8 +114,37 @@ void YtyCamera::DoDispose(void)
 void YtyCamera::StartApplication(void)
 {
     NS_LOG_FUNCTION(this);
-    m_running = true;
 
+    // 在启动应用时，根据Codec类型完成最终的初始化
+    m_codecSimulator = std::make_unique<YtyCodecSimulator>(m_codec);
+
+    if (m_codec == "H.264") {
+        m_resolution = "1280x720";
+        m_frameRate = 30;
+        m_crf = 26;
+        // 根据这个初始配置，查找一个初始的实际码率
+        EncodingParams params = m_codecSimulator->FindBestParams(2000, m_resolution, m_frameRate, 0); // 假设初始带宽2Mbps
+        if (params.found) {
+            m_actualBitrate = params.actual_bitrate_kbps * 1000;
+        } else {
+            m_actualBitrate = 1000000; // 备用值
+        }
+    } else { // H.265
+        m_resolution = "1920x1080";
+        m_frameRate = 30;
+        m_crf = 28;
+        // 根据这个初始配置，查找一个初始的实际码率
+        EncodingParams params = m_codecSimulator->FindBestParams(2000, m_resolution, m_frameRate, 0); // 假设初始带宽2Mbps
+        if (params.found) {
+            m_actualBitrate = params.actual_bitrate_kbps * 1000;
+        } else {
+            m_actualBitrate = 1500000; // 备用值
+        }
+    }
+    // NS_LOG_INFO("Camera " << m_cameraId << " (" << m_codec << ") initialized with Res: " << m_resolution << ", FPS: " << m_frameRate << ", CRF: " << m_crf << ", initial Bitrate: " << m_actualBitrate / 1000 << "kbps");
+
+
+    m_running = true;
 
     if (!m_socket)
     {
@@ -179,7 +210,7 @@ void YtyCamera::Encoder(void)
     
     // 使用由 CodecSimulator 决定的真实码率
     uint32_t frameSize = m_actualBitrate / m_frameRate;
-    uint32_t numPacketsInFrame = (frameSize / 8 + m_packetSize - 1) / m_packetSize;
+    uint32_t numPacketsInFrame = (frameSize + m_packetSize - 1) / m_packetSize;
 
     for (uint32_t i = 0; i < numPacketsInFrame; ++i)
     {
@@ -293,31 +324,69 @@ void YtyCamera::SendEncodingParams()
 }
 
 
-// +++ 【新增】根据服务器下发的带宽，更新编码参数 +++
 void YtyCamera::UpdateEncodingParameters(uint32_t bandwidthBps)
 {
     double target_kbps = bandwidthBps / 1000.0;
-    EncodingParams params = m_codecSimulator->FindParams(target_kbps);
+    int switch_res_direction = 0; // 0=不切换, 1=升, -1=降
 
-    if(params.found) {
-        bool paramsChanged = (m_resolution != params.resolution || m_frameRate != (uint32_t)params.frame_rate || m_crf != (uint32_t)params.crf);
+    // 1. 更新决策压力值
+    // 先在当前分辨率下探测一下，如果按当前带宽，CRF会是多少
+    EncodingParams probe_params = m_codecSimulator->FindBestParams(target_kbps, m_resolution, m_frameRate, 0);
 
-        // +++ 【核心修正 2】确保首次参数一定会被上报 +++
-        // 上报条件：参数发生变化，或者会话尚未激活（意味着这是第一次计算参数）
+    if (probe_params.found) {
+        switch(probe_params.qualityLevel) {
+            case CRF_QUALITY_TOO_HIGH:
+                // CRF过低，画质太好，增加“升分辨率”的压力
+                // CRF越低，压力增加越快
+                m_increaseResPressure += (21 - probe_params.crf) * 10;
+                // 同时缓慢恢复“降分辨率”的压力
+                m_decreaseResPressure = std::max(0, m_decreaseResPressure - m_pressureRecoveryRate);
+                break;
+            case CRF_QUALITY_TOO_LOW:
+                // CRF过高，画质太差，增加“降分辨率”的压力
+                // CRF越高，压力增加越快
+                m_decreaseResPressure += (probe_params.crf - 28) * 10;
+                 // 同时缓慢恢复“升分辨率”的压力
+                m_increaseResPressure = std::max(0, m_increaseResPressure - m_pressureRecoveryRate);
+                break;
+            case CRF_QUALITY_GOOD:
+                // CRF在舒适区，双向压力都缓慢恢复
+                m_increaseResPressure = std::max(0, m_increaseResPressure - m_pressureRecoveryRate);
+                m_decreaseResPressure = std::max(0, m_decreaseResPressure - m_pressureRecoveryRate);
+                break;
+        }
+    }
+
+    // 2. 检查压力是否达到阈值，决定是否切换分辨率
+    if (m_increaseResPressure >= m_pressureThreshold) {
+        switch_res_direction = 1; // 触发升档
+        m_increaseResPressure = 0; // 清空压力
+    } else if (m_decreaseResPressure >= m_pressureThreshold) {
+        switch_res_direction = -1; // 触发降档
+        m_decreaseResPressure = 0; // 清空压力
+    }
+    
+    // 3. 调用真正的参数查找函数
+    EncodingParams final_params = m_codecSimulator->FindBestParams(target_kbps, m_resolution, m_frameRate, switch_res_direction);
+
+    if(final_params.found) {
+        bool paramsChanged = (m_resolution != final_params.resolution || m_frameRate != (uint32_t)final_params.frame_rate || m_crf != (uint32_t)final_params.crf);
         bool shouldSendUpdate = paramsChanged || !m_sessionActive;
 
-        m_resolution = params.resolution;
-        m_frameRate = params.frame_rate;
-        m_crf = params.crf;
-        m_actualBitrate = params.actual_bitrate_kbps * 1000; // 转换回 bps
+        m_resolution = final_params.resolution;
+        m_frameRate = final_params.frame_rate;
+        m_crf = final_params.crf;
+        m_actualBitrate = final_params.actual_bitrate_kbps * 1000; // 转换回 bps
 
-        NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera " << m_cameraId << " updated params for bandwidth " << bandwidthBps/1000 << "kbps -> "
-                    << "Res: " << m_resolution << ", FPS: " << m_frameRate << ", CRF: " << m_crf << ", Actual Bitrate: " << m_actualBitrate/1000 << "kbps");
+        NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera " << m_cameraId 
+                    << " [IncP:" << m_increaseResPressure << ", DecP:" << m_decreaseResPressure << "]"
+                    << " updated for bandwidth " << target_kbps << "kbps -> "
+                    << "Res: " << m_resolution << ", FPS: " << m_frameRate << ", CRF: " << m_crf 
+                    << ", Actual Bitrate: " << m_actualBitrate/1000 << "kbps");
 
-        // 根据新的条件决定是否上报
         if (shouldSendUpdate) {
             SendEncodingParams();
-            // 如果参数真的变化了（而非首次设置），才需要重新协商帧率
+            // 如果是参数真的变化了，需要通过PLAY请求重新协商帧率
             if (paramsChanged) {
                  SendRtspRequest("PLAY");
             }
@@ -326,6 +395,7 @@ void YtyCamera::UpdateEncodingParameters(uint32_t bandwidthBps)
         NS_LOG_WARN("Camera " << m_cameraId << " could not find suitable encoding parameters for bandwidth " << target_kbps << "kbps.");
     }
 }
+
 
 
 void YtyCamera::HandleRead(Ptr<Socket> socket)
@@ -344,10 +414,11 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
             
             NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera " << m_cameraId << " received available bandwidth from server: " << receivedBandwidth / 1000 << " kbps");
             
-            // 根据收到的带宽，触发编码器参数更新流程
-            UpdateEncodingParameters(receivedBandwidth);
+            // 增加一个小的随机延迟，防止所有摄像头同时决策造成拥塞风暴
+            double random_delay = CreateObject<UniformRandomVariable>()->GetValue(0.01, 0.05);
+            Simulator::Schedule(Seconds(random_delay), &YtyCamera::UpdateEncodingParameters, this, receivedBandwidth);
 
-            // +++ 【核心修正 1】如果这是第一条有效反馈，则激活会话并停止PLAY重试 +++
+            // 如果这是第一条有效反馈，则激活会话并停止PLAY重试 +++
             if (!m_sessionActive)
             {
                 NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera " << m_cameraId 
