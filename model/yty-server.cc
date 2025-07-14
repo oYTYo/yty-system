@@ -299,7 +299,7 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
             NS_LOG_INFO("为新客户端 " << clientIp << " 创建ZMQ连接...");
             session.zmq_socket = std::make_unique<zmq::socket_t>(*m_zmq_context, zmq::socket_type::req);
             try {
-                session.zmq_socket->connect("tcp://localhost:5556");
+                session.zmq_socket->connect("tcp://localhost:5557");
             } catch(const zmq::error_t& e) {
                 NS_LOG_ERROR("ZMQ连接失败: " << e.what());
             }
@@ -318,20 +318,28 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
                     m_sessions[from].frameRate = negotiatedRate;
                     NS_LOG_INFO("Negotiated frame rate with " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ": " << negotiatedRate << " fps");
 
-                    // ▼▼▼ 【核心修改】在这里计算并存储超时时长 ▼▼▼
+                    // 在这里计算并存储超时时长 ▼▼▼
                     if (negotiatedRate > 0) {
                         // 使用1.5倍帧间隔作为超时，增加网络抖动容忍度
-                        m_sessions[from].stutterTimeout = MilliSeconds(1200 / negotiatedRate);
+                        m_sessions[from].stutterTimeout = MilliSeconds(2000 / negotiatedRate);
                     }
-                    // ▲▲▲ 【核心修改】▲▲▲
+
+                    // 如果帧率发生变化，则立即重置播放调度
+                    if (session.playbackEvent.IsRunning() && negotiatedRate > 0)
+                    {
+                        // 如果播放事件正在运行（意味着这不是第一次PLAY），并且我们收到了一个有效的新帧率
+                        NS_LOG_INFO("Frame rate changed for " << clientIp << ". Rescheduling playback event.");
+                        Simulator::Cancel(session.playbackEvent); // 取消基于旧帧率的播放计划
+                        session.playbackEvent = Simulator::Schedule(Seconds(1.0 / negotiatedRate), &YtyServer::TryPlayback, this, from); // 立即用新帧率安排下一次播放
+                    }
                     
                 } catch (const std::exception& e) {
-                    NS_LOG_WARN("Failed to parse frame rate from request. Using default: " << m_sessions[from].frameRate);
+                    NS_LOG_WARN("没有成功解析出帧率，使用默认值: " << m_sessions[from].frameRate);
                 }
             }
             else
             {
-                NS_LOG_INFO("No frame rate header found. Using default: " << m_sessions[from].frameRate);
+                NS_LOG_INFO("报头没有帧率，使用默认值: " << m_sessions[from].frameRate);
             }
             // --- 解析结束 ---
 
