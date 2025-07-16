@@ -297,7 +297,7 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
             // m_sessions[from] = ClientSession();
             // m_sessions[from].lastReportTime = Simulator::Now();
 
-            // VVV 修改: 核心逻辑 - 从注册表查找信息 VVV
+            // 从注册表查找信息
             auto it = m_clientInfoRegistry.find(clientIp);
             if (it == m_clientInfoRegistry.end())
             {
@@ -309,7 +309,9 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
             session.lastReportTime = Simulator::Now();
             // 将预先注册的信息填充到当前会话中
             session.clientInfo = it->second; 
-            // ^^^ 修改 ^^^
+
+            // 给一个还不错的初始吞吐量
+            session.lastThroughputKbpsForAI = 2000.0;
 
 
             // +++ VVV 新增: 为新会话创建并连接ZMQ socket +++
@@ -571,7 +573,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         throughputKbps = (session.logIntervalReceivedBytes * 8.0) / logIntervalDuration.GetSeconds() / 1000.0;
     }
     // 更新供AI模块使用的缓存值
-    session.lastThroughputKbpsForAI = 2000;
+    session.lastThroughputKbpsForAI = throughputKbps;
 
     // 计算其他指标的平均值
     double avgDelayMs = 0.0;
@@ -624,7 +626,13 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 
 // --- 【核心修改】移除 Sampled Bps 和 Delta Bps 相关逻辑 ---
 uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double bandwidthKbps, Time delay, double lossRate)
-{
+{   
+
+    if (bandwidthKbps == 0 && delay.IsZero() && lossRate == 0.0)
+    {
+        return 1000000; // 直接返回 1 Mbps
+    }
+
     // 默认带宽，如果AI通信失败则使用
     const uint32_t DEFAULT_BITRATE = 1000000; // 1 Mbps
     // 1. 将目标码率初始化为默认值
