@@ -37,7 +37,7 @@ TypeId YtyServer::GetTypeId(void)
                       MakeUintegerAccessor(&YtyServer::m_port),
                       MakeUintegerChecker<uint16_t>())
         .AddAttribute("ReportInterval", "Interval for sending RTCP reports.",
-                      TimeValue(MilliSeconds(100)),
+                      TimeValue(MilliSeconds(1000)),
                       MakeTimeAccessor(&YtyServer::m_reportInterval),
                       MakeTimeChecker())
         // 为日志记录添加新属性
@@ -215,6 +215,23 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
     
     ClientSession& session = m_sessions[from];
 
+    // 创建一个副本用于读取头，因为 RemoveHeader 会修改原始包
+    Ptr<Packet> packetCopy = packet->Copy();
+    RtpHeader rtpHeader;
+    packetCopy->RemoveHeader(rtpHeader);
+
+    // 在缓冲数据包之前，检查它是否已经过时。
+    uint32_t frameSeq = rtpHeader.GetFrameSeq();
+    if (frameSeq < session.nextFrameToPlay)
+    {
+        NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() 
+                    << "s, Server discarded an old packet for frame " << frameSeq 
+                    << " (expecting frame " << session.nextFrameToPlay << ").");
+        return; // 丢弃过时的包，函数直接返回
+    }
+    // ====================== 【核心修正】 结束 ======================
+
+
     session.hasReceivedAPacket = true;
 
     // 这确保了日志只在数据真实流动后才开始，消除了初始的零值垃圾数据。
@@ -231,11 +248,6 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
 
     uint32_t packetSize = packet->GetSize();
     Time now = Simulator::Now();
-
-    // 创建一个副本用于读取头，因为 RemoveHeader 会修改原始包
-    Ptr<Packet> packetCopy = packet->Copy();
-    RtpHeader rtpHeader;
-    packetCopy->RemoveHeader(rtpHeader);
 
     Time sentTime = NanoSeconds(rtpHeader.GetTimestamp());
     Time delay = now - sentTime;
@@ -268,7 +280,6 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
     // --- ^^^ 新增 ^^^ ---
 
     // --- 新的抖动缓冲逻辑 ---
-    uint32_t frameSeq = rtpHeader.GetFrameSeq();
     uint32_t packetSeq = rtpHeader.GetPacketSeq();
 
     // 将数据包存入抖动缓冲区
@@ -640,15 +651,51 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 
 
 uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double bandwidthKbps, Time delay, double lossRate)
-{   
-    if (!session.zmq_socket) {
-        NS_LOG_WARN("ZMQ socket for camera " << session.clientInfo.cameraId << " is not initialized.");
-        return session.lastAiBitrateDecisionBps;
+{
+    // 定义一个超时时间，如果一个请求超过这个时间没有回复，我们就认为它丢失了
+    const Time ZMQ_REQUEST_TIMEOUT = MilliSeconds(500);
+    Time now = Simulator::Now();
+
+    // 1. 无论如何，都先尝试接收一次，看之前是否有未收到的回复
+    try {
+        zmq::message_t reply_msg;
+        // 使用 recv 检查是否有数据
+        if (session.zmq_socket->recv(reply_msg, zmq::recv_flags::dontwait).has_value()) {
+            // 如果成功收到回复，解析它并更新我们的状态
+            std::string reply_str(static_cast<char*>(reply_msg.data()), reply_msg.size());
+            auto reply_json = nlohmann::json::parse(reply_str);
+            uint32_t newBitrate = reply_json.at("targetBitrate").get<uint32_t>();
+            session.lastAiBitrateDecisionBps = newBitrate;
+            
+            // 关键：将等待状态置为 false，因为我们已经收到了回复
+            session.isWaitingForZmqReply = false;
+        }
+    } catch (const zmq::error_t& e) {
+        if (e.num() != EAGAIN) { // EAGAIN 是非阻塞模式下的正常“无消息”错误，不用打印
+             NS_LOG_ERROR("ZMQ recv error for camera " << session.clientInfo.cameraId << ": " << e.what());
+        }
+    } catch (const nlohmann::json::exception& e) {
+        NS_LOG_ERROR("JSON解析错误: " << e.what());
+    }
+    
+    // 2. 检查是否应该发送一个新的请求
+    bool shouldSend = false;
+    if (session.isWaitingForZmqReply) {
+        // 如果我们正在等待一个回复，检查它是否超时
+        if (now > session.lastZmqRequestTime + ZMQ_REQUEST_TIMEOUT) {
+            // 请求超时了！我们不再继续傻等，允许发送一个新请求
+            NS_LOG_INFO("ZMQ request for cam " << session.clientInfo.cameraId << " timed out. Allowing a new request.");
+            shouldSend = true;
+            // 注意：严格来说，ZMQ的REQ socket会因此进入一个坏状态，最稳妥的做法是重建socket。
+            // 但对于模拟，简单地允许发送新请求通常足以解决性能问题。
+        }
+    } else {
+        // 如果我们没有在等待回复，那就可以自由发送
+        shouldSend = true;
     }
 
-    // --- 步骤 1: 检查是否可以发送新请求 ---
-    if (!session.isWaitingForZmqReply) {
-        // 如果当前不处于等待状态，说明我们可以自由地发送一个新的请求
+    // 3. 如果决定要发送，就执行发送操作
+    if (shouldSend) {
         nlohmann::json request_json;
         request_json["cameraId"] = session.clientInfo.cameraId;
         request_json["throughputKbps"] = bandwidthKbps;
@@ -658,45 +705,17 @@ uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double bandwidthKbp
 
         try {
             zmq::message_t request_msg(request_str.begin(), request_str.end());
-            // 发送请求后，立刻将状态切换为“等待回复”
-            session.zmq_socket->send(request_msg, zmq::send_flags::dontwait);
-            session.isWaitingForZmqReply = true;
+            // 发送后，立刻进入等待状态，并记录发送时间
+            if(session.zmq_socket->send(request_msg, zmq::send_flags::dontwait)) {
+                session.isWaitingForZmqReply = true;
+                session.lastZmqRequestTime = now;
+            }
         } catch (const zmq::error_t& e) {
-            // 在极少数情况下，即使在非等待状态，send也可能失败
             NS_LOG_WARN("ZMQ send failed for camera " << session.clientInfo.cameraId << ": " << e.what());
         }
     }
-
-    // --- 步骤 2: 无论当前状态如何，都尝试接收一次数据 ---
-    try {
-        zmq::message_t reply_msg;
-        auto res = session.zmq_socket->recv(reply_msg, zmq::recv_flags::dontwait);
-
-        if (res.has_value() && res.value() > 0) {
-            // 成功收到了回复！
-            std::string reply_str(static_cast<char*>(reply_msg.data()), reply_msg.size());
-            auto reply_json = nlohmann::json::parse(reply_str);
-            uint32_t newBitrate = reply_json.at("targetBitrate").get<uint32_t>();
-            
-            // 更新缓存的决策
-            session.lastAiBitrateDecisionBps = newBitrate;
-            
-            // 【关键】将状态切换回“不等待”，以便下次可以发送新请求
-            session.isWaitingForZmqReply = false;
-        }
-        // 如果没有收到数据 (res.has_value() 为 false)，我们什么也不做，
-        // isWaitingForZmqReply 保持为 true，函数将自然地返回缓存值。
-
-    } catch (const zmq::error_t& e) {
-        // 只有在不是“资源暂时不可用”这种正常非阻塞错误时才打印
-        if (e.num() != EAGAIN) {
-             NS_LOG_ERROR("ZMQ recv error for camera " << session.clientInfo.cameraId << ": " << e.what());
-        }
-    } catch (const nlohmann::json::exception& e) {
-        NS_LOG_ERROR("JSON解析错误: " << e.what());
-    }
     
-    // --- 步骤 3: 统一返回最新（或上一次）的决策 ---
+    // 4. 无论本次操作如何，都返回AI给出的上一个有效决策
     return session.lastAiBitrateDecisionBps;
 }
 

@@ -143,6 +143,7 @@ private:
 
         uint32_t    lastAiBitrateDecisionBps;
         bool        isWaitingForZmqReply;
+        Time        lastZmqRequestTime; // 记录上次发送请求的时间
 
 
 
@@ -192,7 +193,8 @@ private:
             aiBandwidth(0), // 初始化为0
 
             lastAiBitrateDecisionBps(1000000),
-            isWaitingForZmqReply(false)
+            isWaitingForZmqReply(false),
+            lastZmqRequestTime(Seconds(0))
             
         {
         }
