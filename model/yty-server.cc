@@ -215,6 +215,8 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
     
     ClientSession& session = m_sessions[from];
 
+    session.hasReceivedAPacket = true;
+
     // 这确保了日志只在数据真实流动后才开始，消除了初始的零值垃圾数据。
     if (!session.loggingStarted)
     {
@@ -533,6 +535,17 @@ void YtyServer::HandleStutter(const Address& clientAddress)
     ClientSession& session = m_sessions[clientAddress];
     NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, STUTTER detected for frame " << session.nextFrameToPlay << ". Skipping.");
 
+    
+    // 在跳过这一帧之前，必须将其已缓存的数据从抖动缓冲区中清除。这是防止数据结构无限增长、导致仿真速度变慢的关键。
+    uint32_t frameToClean = session.nextFrameToPlay;
+    if (session.buffer.count(frameToClean))
+    {
+        // 从 map 中删除这个永远不会被播放的帧的所有相关数据。
+        session.buffer.erase(frameToClean);
+        NS_LOG_INFO("从缓冲区中删掉帧 " << frameToClean << " 避免持续累积.");
+    }
+    // ====================== 【核心修正】 结束 ======================
+
     session.stutterEvents++;
     session.nextFrameToPlay++; // 跳过迟到的帧
 
@@ -624,68 +637,70 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 }
 
 
-// --- 【核心修改】移除 Sampled Bps 和 Delta Bps 相关逻辑 ---
+
+
 uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double bandwidthKbps, Time delay, double lossRate)
 {   
-
-    if (bandwidthKbps == 0 && delay.IsZero() && lossRate == 0.0)
-    {
-        return 1000000; // 直接返回 1 Mbps
-    }
-
-    // 默认带宽，如果AI通信失败则使用
-    const uint32_t DEFAULT_BITRATE = 1000000; // 1 Mbps
-    // 1. 将目标码率初始化为默认值
-    uint32_t targetBitrate = DEFAULT_BITRATE;
-
     if (!session.zmq_socket) {
         NS_LOG_WARN("ZMQ socket for camera " << session.clientInfo.cameraId << " is not initialized.");
-        // 如果socket无效，将使用默认码率继续执行下面的差值计算
-    } 
-    else 
-    {
-        // 2. 构建JSON请求
+        return session.lastAiBitrateDecisionBps;
+    }
+
+    // --- 步骤 1: 检查是否可以发送新请求 ---
+    if (!session.isWaitingForZmqReply) {
+        // 如果当前不处于等待状态，说明我们可以自由地发送一个新的请求
         nlohmann::json request_json;
         request_json["cameraId"] = session.clientInfo.cameraId;
         request_json["throughputKbps"] = bandwidthKbps;
         request_json["delayMs"] = delay.GetMilliSeconds();
         request_json["lossRate"] = lossRate;
-        
         std::string request_str = request_json.dump();
 
         try {
-            // 3. 发送请求
             zmq::message_t request_msg(request_str.begin(), request_str.end());
-            session.zmq_socket->send(request_msg, zmq::send_flags::none);
-
-            // 4. 等待回复
-            zmq::message_t reply_msg;
-            auto res = session.zmq_socket->recv(reply_msg, zmq::recv_flags::none);
-
-            if (res.has_value() && res.value() > 0)
-            {
-                // 5. 解析回复并更新目标码率
-                std::string reply_str(static_cast<char*>(reply_msg.data()), reply_msg.size());
-                auto reply_json = nlohmann::json::parse(reply_str);
-                targetBitrate = reply_json.at("targetBitrate").get<uint32_t>();
-            } else {
-                NS_LOG_WARN("从Python服务器接收ZMQ回复失败或超时，将使用默认码率。");
-                // 此处不返回，让函数继续执行，使用默认的 targetBitrate
-            }
-
+            // 发送请求后，立刻将状态切换为“等待回复”
+            session.zmq_socket->send(request_msg, zmq::send_flags::dontwait);
+            session.isWaitingForZmqReply = true;
         } catch (const zmq::error_t& e) {
-            NS_LOG_ERROR("ZMQ通信错误: " << e.what() << "，将使用默认码率。");
-            // 此处不返回
-        } catch (const nlohmann::json::exception& e) {
-            NS_LOG_ERROR("JSON解析错误: " << e.what() << "，将使用默认码率。");
-            // 此处不返回
+            // 在极少数情况下，即使在非等待状态，send也可能失败
+            NS_LOG_WARN("ZMQ send failed for camera " << session.clientInfo.cameraId << ": " << e.what());
         }
     }
 
+    // --- 步骤 2: 无论当前状态如何，都尝试接收一次数据 ---
+    try {
+        zmq::message_t reply_msg;
+        auto res = session.zmq_socket->recv(reply_msg, zmq::recv_flags::dontwait);
+
+        if (res.has_value() && res.value() > 0) {
+            // 成功收到了回复！
+            std::string reply_str(static_cast<char*>(reply_msg.data()), reply_msg.size());
+            auto reply_json = nlohmann::json::parse(reply_str);
+            uint32_t newBitrate = reply_json.at("targetBitrate").get<uint32_t>();
+            
+            // 更新缓存的决策
+            session.lastAiBitrateDecisionBps = newBitrate;
+            
+            // 【关键】将状态切换回“不等待”，以便下次可以发送新请求
+            session.isWaitingForZmqReply = false;
+        }
+        // 如果没有收到数据 (res.has_value() 为 false)，我们什么也不做，
+        // isWaitingForZmqReply 保持为 true，函数将自然地返回缓存值。
+
+    } catch (const zmq::error_t& e) {
+        // 只有在不是“资源暂时不可用”这种正常非阻塞错误时才打印
+        if (e.num() != EAGAIN) {
+             NS_LOG_ERROR("ZMQ recv error for camera " << session.clientInfo.cameraId << ": " << e.what());
+        }
+    } catch (const nlohmann::json::exception& e) {
+        NS_LOG_ERROR("JSON解析错误: " << e.what());
+    }
     
-    // 7. 【统一返回】在函数末尾统一返回最终确定的目标码率
-    return targetBitrate;
+    // --- 步骤 3: 统一返回最新（或上一次）的决策 ---
+    return session.lastAiBitrateDecisionBps;
 }
+
+
 
 }
 // namespace ns3

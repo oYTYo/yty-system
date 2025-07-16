@@ -104,6 +104,8 @@ private:
         uint32_t stutterEvents;         // 当前1秒周期内的总卡顿次数
         EventId  logStatsEvent;         // 触发日志记录的事件
         bool     loggingStarted;
+        
+        bool     hasReceivedAPacket;
 
         // --- 用于抖动计算的状态变量 VVV ---
         Time     lastArrivalTime;       // 上一个RTP包的到达时间
@@ -139,6 +141,9 @@ private:
         uint32_t    actualBitrate; // 单位: bps
         uint32_t    aiBandwidth;   // +++ 【新增】存储AI给出的建议带宽 (bps) +++
 
+        uint32_t    lastAiBitrateDecisionBps;
+        bool        isWaitingForZmqReply;
+
 
 
         // 构造函数
@@ -156,6 +161,7 @@ private:
             stutterEvents(0),
 
             loggingStarted(false),
+            hasReceivedAPacket(false),
             
             // --- 初始化新增的抖动相关成员变量 ---
             lastArrivalTime(Seconds(0)),
@@ -183,8 +189,10 @@ private:
             resolution("N/A"),
             crf(0),
             actualBitrate(0),
-            aiBandwidth(0) // 初始化为0
-            
+            aiBandwidth(0), // 初始化为0
+
+            lastAiBitrateDecisionBps(1000000),
+            isWaitingForZmqReply(false)
             
         {
         }
