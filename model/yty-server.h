@@ -155,7 +155,7 @@ private:
             lastReportedSentPackets(0),
             maxSeenSentPackets(0),
             lastReportTime(Seconds(0)),
-            nextFrameToPlay(0),
+            nextFrameToPlay(1),
             stutterTimeout(MilliSeconds(40)), // <<< 新增: 给予一个默认值
             frameRate(30), // 给一个默认值, 以防协商失败
             playedFrames(0),

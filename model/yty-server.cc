@@ -224,12 +224,9 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
     uint32_t frameSeq = rtpHeader.GetFrameSeq();
     if (frameSeq < session.nextFrameToPlay)
     {
-        NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() 
-                    << "s, Server discarded an old packet for frame " << frameSeq 
-                    << " (expecting frame " << session.nextFrameToPlay << ").");
+        // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server discarded an old packet for frame " << frameSeq << " (expecting frame " << session.nextFrameToPlay << ").");
         return; // 丢弃过时的包，函数直接返回
     }
-    // ====================== 【核心修正】 结束 ======================
 
 
     session.hasReceivedAPacket = true;
@@ -442,13 +439,41 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     }
     if (lossRate < 0) lossRate = 0.0;
 
-    // --- 2. 调用AI模块获取可用带宽 ---
-    uint32_t aiBandwidth = GetBitrateFromAI(session, session.lastThroughputKbpsForAI, avgDelay, lossRate);
+    // --- 2. 【新增】乐观带宽探测逻辑 ---
+    // 定义触发探测的阈值
+    const double PROBE_LOSS_RATE_THRESHOLD = 0.001; // 丢包率低于 0.1%
+    const Time   PROBE_DELAY_THRESHOLD     = MilliSeconds(10); // 延迟低于 10ms
+    
+    // 从摄像头最新的参数报告中获取其当前的发送码率
+    double currentActualBitrateKbps = session.actualBitrate / 1000.0;
+
+    // 获取AI上一次给出的建议带宽
+    double lastAiBandwidthKbps = session.aiBandwidth / 1000.0;
+
+    // 决定本次要报告给AI的带宽值
+    double bandwidthToReportKbps = session.lastThroughputKbpsForAI;
+    
+    // 检查是否满足“信息饥饿”条件
+    if (lossRate < PROBE_LOSS_RATE_THRESHOLD && avgDelay < PROBE_DELAY_THRESHOLD)
+    {
+        // 网络状况极好，但吞吐量可能很低，需要主动探测
+        // NS_LOG_INFO("Camera " << session.clientInfo.cameraId << ": Network is perfect (loss=" << lossRate << ", delay=" << avgDelay.GetMilliSeconds() << "ms). Activating optimistic probing.");
+        
+        // 我们选择一个更激进的值来报告给AI，鼓励它提速
+        // 这个值可以是当前摄像头实际发送码率的1.25倍，或者是AI上次建议带宽的1.25倍，取较大者
+        double optimisticBw = std::max(currentActualBitrateKbps, lastAiBandwidthKbps) * 1.25;
+
+        // 确保探测值至少比当前测得的吞吐量大
+        bandwidthToReportKbps = std::max(session.lastThroughputKbpsForAI, optimisticBw);
+    }
+
+    // --- 3. 调用AI模块获取可用带宽，注意：传入的是我们处理过的带宽值 ---
+    uint32_t aiBandwidth = GetBitrateFromAI(session, bandwidthToReportKbps, avgDelay, lossRate);
 
     // +++ 将AI给出的带宽建议存入会话，以便日志记录 +++
     session.aiBandwidth = aiBandwidth;
 
-    // --- 3. 将服务器计算出的【可用带宽】发送回摄像头 ---
+    // --- 4. 将服务器计算出的【可用带宽】发送回摄像头 ---
     Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&aiBandwidth), sizeof(uint32_t));
 
     m_socket->SendTo(rtcpPacket, 0, clientAddress);
@@ -650,6 +675,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 
 
 
+// 在 yty-server.cc 文件中
 uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double bandwidthKbps, Time delay, double lossRate)
 {
     // 定义一个超时时间，如果一个请求超过这个时间没有回复，我们就认为它丢失了
@@ -657,37 +683,60 @@ uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double bandwidthKbp
     Time now = Simulator::Now();
 
     // 1. 无论如何，都先尝试接收一次，看之前是否有未收到的回复
-    try {
-        zmq::message_t reply_msg;
-        // 使用 recv 检查是否有数据
-        if (session.zmq_socket->recv(reply_msg, zmq::recv_flags::dontwait).has_value()) {
-            // 如果成功收到回复，解析它并更新我们的状态
-            std::string reply_str(static_cast<char*>(reply_msg.data()), reply_msg.size());
-            auto reply_json = nlohmann::json::parse(reply_str);
-            uint32_t newBitrate = reply_json.at("targetBitrate").get<uint32_t>();
-            session.lastAiBitrateDecisionBps = newBitrate;
-            
-            // 关键：将等待状态置为 false，因为我们已经收到了回复
-            session.isWaitingForZmqReply = false;
+    // 这个操作只在 isWaitingForZmqReply 为 true 时有意义
+    if (session.isWaitingForZmqReply)
+    {
+        try {
+            zmq::message_t reply_msg;
+            if (session.zmq_socket->recv(reply_msg, zmq::recv_flags::dontwait).has_value()) {
+                // 如果成功收到回复，解析它并更新我们的状态
+                std::string reply_str(static_cast<char*>(reply_msg.data()), reply_msg.size());
+                auto reply_json = nlohmann::json::parse(reply_str);
+                uint32_t newBitrate = reply_json.at("targetBitrate").get<uint32_t>();
+                session.lastAiBitrateDecisionBps = newBitrate;
+                
+                // 关键：将等待状态置为 false，因为我们已经收到了回复
+                session.isWaitingForZmqReply = false;
+            }
+        } catch (const zmq::error_t& e) {
+            if (e.num() != EAGAIN) { // EAGAIN 是非阻塞模式下的正常“无消息”错误，不用打印
+                 NS_LOG_ERROR("ZMQ recv error for camera " << session.clientInfo.cameraId << ": " << e.what());
+            }
+        } catch (const nlohmann::json::exception& e) {
+            NS_LOG_ERROR("JSON解析错误: " << e.what());
         }
-    } catch (const zmq::error_t& e) {
-        if (e.num() != EAGAIN) { // EAGAIN 是非阻塞模式下的正常“无消息”错误，不用打印
-             NS_LOG_ERROR("ZMQ recv error for camera " << session.clientInfo.cameraId << ": " << e.what());
-        }
-    } catch (const nlohmann::json::exception& e) {
-        NS_LOG_ERROR("JSON解析错误: " << e.what());
     }
     
     // 2. 检查是否应该发送一个新的请求
     bool shouldSend = false;
     if (session.isWaitingForZmqReply) {
-        // 如果我们正在等待一个回复，检查它是否超时
+        // 如果我们仍在等待一个回复，检查它是否超时
         if (now > session.lastZmqRequestTime + ZMQ_REQUEST_TIMEOUT) {
-            // 请求超时了！我们不再继续傻等，允许发送一个新请求
-            NS_LOG_INFO("ZMQ request for cam " << session.clientInfo.cameraId << " timed out. Allowing a new request.");
+          
+            // 请求超时了！我们必须销毁并重建套接字来重置ZMQ的状态机。
+            // NS_LOG_INFO("ZMQ request for cam " << session.clientInfo.cameraId << " timed out. Resetting ZMQ socket.");
+
+            // 销毁旧的套接字
+            session.zmq_socket->close();
+            // 创建一个全新的套接字
+            session.zmq_socket = std::make_unique<zmq::socket_t>(*m_zmq_context, zmq::socket_type::req);
+            
+            // 【重要】为新套接字设置一个合理的超时，防止send/recv无限期阻塞 (虽然我们用的是非阻塞)
+            int timeout_ms = 200; // 200ms
+            session.zmq_socket->set(zmq::sockopt::rcvtimeo, timeout_ms);
+            session.zmq_socket->set(zmq::sockopt::sndtimeo, timeout_ms);
+
+            // 重新连接
+            try {
+                session.zmq_socket->connect("tcp://localhost:5557");
+            } catch(const zmq::error_t& e) {
+                NS_LOG_ERROR("ZMQ (re)connection failed: " << e.what());
+            }
+
+            // 重置状态，允许在新的套接字上发送请求
+            session.isWaitingForZmqReply = false;
             shouldSend = true;
-            // 注意：严格来说，ZMQ的REQ socket会因此进入一个坏状态，最稳妥的做法是重建socket。
-            // 但对于模拟，简单地允许发送新请求通常足以解决性能问题。
+          
         }
     } else {
         // 如果我们没有在等待回复，那就可以自由发送
