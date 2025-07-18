@@ -14,15 +14,55 @@
 #include <map>
 #include <vector>
 #include <fstream>
-#include <memory>
 
+#include <memory> 
 
-#include "zmq.hpp"
 
 namespace ns3 {
 
 class Socket;
 class Packet;
+
+
+// --- 定义 NetworkState ---
+enum class NetworkState {
+    Normal,   // 正常: 延迟稳定，可以缓慢增加码率
+    Overuse,  // 过载: 延迟有增长趋势，必须降低码率
+    Underuse  // 未充分利用: 延迟有降低趋势，可以更积极地增加码率
+};
+
+// --- GCCController 类定义 ---
+class GCCController {
+public:
+    // --- 构造函数 ---
+    // start_bitrate_kbps 初始码率 (kbps)
+    GCCController(double start_bitrate_kbps = 800.0); // 声明构造函数
+
+    // --- 核心入口函数 ---
+    // 适配 ns-3 的参数接口，不再接受 json
+    double get_target_bitrate_kbps(double throughputKbps, double delayMs, double lossRate, double rttMs, long long currentTimeMs);
+    
+    // --- 辅助函数 ---
+    std::string get_state_string() const;
+
+private:
+    // --- 内部成员变量 ---
+    // (与 gcc_server.cpp 中的成员变量保持一致)
+    double current_bitrate_bps_;
+    double last_acked_bitrate_bps_;
+    long long last_update_ms_;
+    long long last_group_arrival_time_ms_;
+    long long last_group_timestamp_ms_;
+    double overuse_threshold_ms_;
+    NetworkState state_;
+    long long time_of_last_bitrate_increase_ms_;
+
+    // --- 算法实现：内部辅助方法 ---
+    std::string loss_based_control(double loss_rate);
+    std::string delay_based_control(double delay_ms, long long current_time_ms);
+    void update_bitrate(const std::string& loss_decision, const std::string& delay_decision, double rtt_ms, long long current_time_ms);
+};
+
 
 
 /**
@@ -133,8 +173,6 @@ private:
         // 直接包含一个ClientInfo结构体 VVV
         ClientInfo clientInfo;
 
-        std::unique_ptr<zmq::socket_t> zmq_socket;
-
         // --- 【核心修改】新增用于存储和记录新编码参数的变量 ---
         std::string resolution;
         uint32_t    crf;
@@ -142,8 +180,8 @@ private:
         uint32_t    aiBandwidth;   // +++ 【新增】存储AI给出的建议带宽 (bps) +++
 
         uint32_t    lastAiBitrateDecisionBps;
-        bool        isWaitingForZmqReply;
-        Time        lastZmqRequestTime; // 记录上次发送请求的时间
+
+        std::unique_ptr<GCCController> gccController;
 
 
 
@@ -184,7 +222,6 @@ private:
             logIntervalStartTime(Seconds(0)),
             lastThroughputKbpsForAI(0.0),
            
-            zmq_socket(nullptr),
 
             // --- 【核心修改】初始化新成员 ---
             resolution("N/A"),
@@ -193,8 +230,8 @@ private:
             aiBandwidth(0), // 初始化为0
 
             lastAiBitrateDecisionBps(1000000),
-            isWaitingForZmqReply(false),
-            lastZmqRequestTime(Seconds(0))
+
+            gccController(std::make_unique<GCCController>()) 
             
         {
         }
@@ -230,26 +267,12 @@ private:
     std::ofstream m_logFile;
     Time m_logInterval;
 
-    // VVV 客户端信息注册表 VVV
+
     // 将每个客户端的IP地址映射到其完整的元数据
     std::map<Ipv4Address, ClientInfo> m_clientInfoRegistry;
-   
-
-    // VVV ZMQ上下文 VVV
-    // ZMQ的上下文环境，对于整个服务器应用应该是唯一的
-    std::unique_ptr<zmq::context_t> m_zmq_context;
   
 
-    // VVV 一个新的私有方法，用于和Python端交互 VVV
-    /**
-     * @brief 从Python RL Agent获取码率决策
-     * @param session 相关的客户端会话
-     * @param throughput 当前测量的吞吐率 (kbps)
-     * @param delay 当前测量的延迟 (ms)
-     * @param lossRate 当前测量的丢包率
-     * @return Agent决策的目标码率 (bps)
-     */
-    uint32_t GetBitrateFromAI(ClientSession& session, double throughput, Time delay, double lossRate);
+    uint32_t GetBitrateFromGCC(ClientSession& session, double throughput, Time delay, double lossRate);
     
 };
 

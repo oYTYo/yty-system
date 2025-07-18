@@ -17,14 +17,151 @@
 #include <string>
 #include <cmath> // 包含 cmath 以使用 std::abs
 
-#include <nlohmann/json.hpp> // <<< 新增: 需要一个json库，推荐 nlohmann/json,// 您需要将其头文件放到ns-3可以找到的目录// 例如，下载 json.hpp 并放在 /usr/local/include/
-
 #include "yty-camera.h" // 包含摄像头头文件以使用 RtpHeader
+
+#include <algorithm>
+#include <iomanip>
+
 
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE("YtyServerApplication");
 NS_OBJECT_ENSURE_REGISTERED(YtyServer);
+
+
+// 码率的绝对上限和下限，防止码率无限增长或低到无意义
+const double MAX_BITRATE_MBPS = 10.0; // 码率最高不超过 10 Mbps
+const double MIN_BITRATE_KBPS = 100.0; // 码率最低不低于 100 Kbps
+
+// 单位换算常量
+const double BPS_IN_KBPS = 1000.0; // 1 Kbps = 1000 bps
+
+// 基于丢包控制的两个核心阈值
+const double LOSS_RATE_THRESHOLD_LOW = 0.001;   // 丢包率低于 0.1% 时，网络被认为是“健康的”，允许码率增加
+const double LOSS_RATE_THRESHOLD_HIGH = 0.01;   // 丢包率高于 1% 时，网络被认为是“严重拥塞的”，必须降低码率
+
+// 基于延迟控制的核心初始阈值 (gamma)
+const double OVERUSE_THRESHOLD_MS_INITIAL = 12.5; // 延迟变化趋势的初始判断阈值 (单位: 毫秒)
+
+// 定义一个标准的数据包大小（字节），用于加性增的计算。
+const double AVERAGE_PACKET_SIZE_BYTES = 1200.0;
+
+
+// --- GCCController 构造函数实现 ---
+// (这部分也要从 gcc_server.cpp 迁移过来)
+GCCController::GCCController(double start_bitrate_kbps)
+    : current_bitrate_bps_(start_bitrate_kbps * BPS_IN_KBPS),
+      last_acked_bitrate_bps_(0.0),
+      last_update_ms_(-1),
+      last_group_arrival_time_ms_(-1),
+      last_group_timestamp_ms_(-1),
+      overuse_threshold_ms_(OVERUSE_THRESHOLD_MS_INITIAL),
+      state_(NetworkState::Normal),
+      time_of_last_bitrate_increase_ms_(-1) {}
+
+
+// --- GCCController 方法实现 (精确复制自 gcc_server.cpp 并适配时间源) ---
+
+std::string GCCController::loss_based_control(double loss_rate) {
+    if (loss_rate > LOSS_RATE_THRESHOLD_HIGH) return "decrease";
+    if (loss_rate < LOSS_RATE_THRESHOLD_LOW) return "increase";
+    return "hold";
+}
+
+std::string GCCController::delay_based_control(double delay_ms, long long current_time_ms) {
+    if (last_group_arrival_time_ms_ == -1) {
+        last_group_arrival_time_ms_ = current_time_ms;
+        last_group_timestamp_ms_ = current_time_ms - static_cast<long long>(delay_ms);
+        return "hold";
+    }
+
+    long long arrival_delta_ms = current_time_ms - last_group_arrival_time_ms_;
+    long long estimated_send_time_ms = current_time_ms - static_cast<long long>(delay_ms);
+    long long timestamp_delta_ms = estimated_send_time_ms - last_group_timestamp_ms_;
+    
+    double delay_variation_ms = static_cast<double>(arrival_delta_ms - timestamp_delta_ms);
+    
+    last_group_arrival_time_ms_ = current_time_ms;
+    last_group_timestamp_ms_ = estimated_send_time_ms;
+
+    if (delay_variation_ms > overuse_threshold_ms_) {
+        state_ = NetworkState::Overuse;
+    } else if (std::abs(delay_variation_ms) < overuse_threshold_ms_) {
+        state_ = NetworkState::Normal;
+    } else { // delay_variation_ms < -overuse_threshold_ms_
+        state_ = NetworkState::Underuse;
+    }
+    
+    double K_u = (overuse_threshold_ms_ < 6) ? 0.01 : 0.00018;
+    double K_d = 0.039;
+    double update_rate = (std::abs(delay_variation_ms) > overuse_threshold_ms_) ? K_u : K_d;
+    overuse_threshold_ms_ += (std::abs(delay_variation_ms) - overuse_threshold_ms_) * update_rate;
+    overuse_threshold_ms_ = std::max(6.0, std::min(overuse_threshold_ms_, 600.0));
+
+    if (state_ == NetworkState::Overuse) return "decrease";
+    if (state_ == NetworkState::Normal) return "increase";
+    if (state_ == NetworkState::Underuse) return "increase";
+    
+    return "hold";
+}
+
+// get_target_bitrate_kbps 接口适配 ns-3 参数
+double GCCController::get_target_bitrate_kbps(double throughputKbps, double delayMs, double lossRate, double rttMs, long long currentTimeMs) {
+    // 移除原始 gcc_server.cpp 中的 JSON 解析部分，直接使用传入的参数
+    last_acked_bitrate_bps_ = throughputKbps * BPS_IN_KBPS;
+    
+    std::string loss_decision = loss_based_control(lossRate);
+    std::string delay_decision = delay_based_control(delayMs, currentTimeMs);
+    
+    update_bitrate(loss_decision, delay_decision, rttMs, currentTimeMs);
+    
+    current_bitrate_bps_ = std::max(current_bitrate_bps_, MIN_BITRATE_KBPS * BPS_IN_KBPS);
+    current_bitrate_bps_ = std::min(current_bitrate_bps_, MAX_BITRATE_MBPS * 1e6); // 1e6 是 MBPS 到 BPS
+
+    return current_bitrate_bps_ / BPS_IN_KBPS;
+}
+
+std::string GCCController::get_state_string() const {
+    switch (state_) {
+        case NetworkState::Normal: return "Normal";
+        case NetworkState::Overuse: return "Overuse";
+        case NetworkState::Underuse: return "Underuse";
+        default: return "Unknown";
+    }
+}
+
+void GCCController::update_bitrate(const std::string& loss_decision, const std::string& delay_decision, double rtt_ms, long long current_time_ms) {
+    if (loss_decision == "decrease" || delay_decision == "decrease") {
+        current_bitrate_bps_ = std::min(
+            current_bitrate_bps_,
+            std::max(last_acked_bitrate_bps_ * 0.85, MIN_BITRATE_KBPS * BPS_IN_KBPS)
+        );
+        time_of_last_bitrate_increase_ms_ = -1;
+        return;
+    }
+
+    if (loss_decision == "increase" && delay_decision == "increase") {
+        if (state_ == NetworkState::Normal) {
+            double time_delta_seconds = (last_update_ms_ > 0) ? 
+                                        (current_time_ms - last_update_ms_) / 1000.0 : 
+                                        0.02; 
+
+            double response_time_ms = 100.0 + rtt_ms;
+            // 还原为 gcc_server.cpp 中的值：0.5
+            double alpha = 0.5 * time_delta_seconds; 
+            // 还原为 gcc_server.cpp 中的值：50000.0
+            double additive_increase_bps = std::max(50000.0, alpha * (AVERAGE_PACKET_SIZE_BYTES * 8000.0) / response_time_ms);
+            
+            current_bitrate_bps_ += additive_increase_bps;
+
+        } else { // state_ == NetworkState::Underuse
+            // 还原为 gcc_server.cpp 中的值：1.15
+            current_bitrate_bps_ *= 1.15;
+        }
+    }
+    last_update_ms_ = current_time_ms;
+}
+
 
 TypeId YtyServer::GetTypeId(void)
 {
@@ -37,7 +174,7 @@ TypeId YtyServer::GetTypeId(void)
                       MakeUintegerAccessor(&YtyServer::m_port),
                       MakeUintegerChecker<uint16_t>())
         .AddAttribute("ReportInterval", "Interval for sending RTCP reports.",
-                      TimeValue(MilliSeconds(1000)),
+                      TimeValue(MilliSeconds(50)),
                       MakeTimeAccessor(&YtyServer::m_reportInterval),
                       MakeTimeChecker())
         // 为日志记录添加新属性
@@ -52,10 +189,7 @@ TypeId YtyServer::GetTypeId(void)
     return tid;
 }
 
-YtyServer::YtyServer() : m_socket(0), m_port(9) {
-    // <<< 新增: 初始化ZMQ上下文 >>>
-    m_zmq_context = std::make_unique<zmq::context_t>(1);
-}
+YtyServer::YtyServer() : m_socket(0), m_port(9) {}
 
 YtyServer::~YtyServer() { m_socket = 0; }
 
@@ -324,15 +458,6 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
             session.lastThroughputKbpsForAI = 2000.0;
 
 
-            // +++ VVV 新增: 为新会话创建并连接ZMQ socket +++
-            NS_LOG_INFO("为新客户端 " << clientIp << " 创建ZMQ连接...");
-            session.zmq_socket = std::make_unique<zmq::socket_t>(*m_zmq_context, zmq::socket_type::req);
-            try {
-                session.zmq_socket->connect("tcp://localhost:5557");
-            } catch(const zmq::error_t& e) {
-                NS_LOG_ERROR("ZMQ连接失败: " << e.what());
-            }
-            // +++ ^^^ 新增 ^^^ +++
 
 
             // --- 新增：解析帧率 ---
@@ -468,7 +593,7 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     }
 
     // --- 3. 调用AI模块获取可用带宽，注意：传入的是我们处理过的带宽值 ---
-    uint32_t aiBandwidth = GetBitrateFromAI(session, bandwidthToReportKbps, avgDelay, lossRate);
+    uint32_t aiBandwidth = GetBitrateFromGCC(session, bandwidthToReportKbps, avgDelay, lossRate);
 
     // +++ 将AI给出的带宽建议存入会话，以便日志记录 +++
     session.aiBandwidth = aiBandwidth;
@@ -673,101 +798,27 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 }
 
 
-
-
-// 在 yty-server.cc 文件中
-uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double bandwidthKbps, Time delay, double lossRate)
+uint32_t YtyServer::GetBitrateFromGCC(ClientSession& session, double throughputKbps, Time delay, double lossRate)
 {
-    // 定义一个超时时间，如果一个请求超过这个时间没有回复，我们就认为它丢失了
-    const Time ZMQ_REQUEST_TIMEOUT = MilliSeconds(500);
-    Time now = Simulator::Now();
+    // 获取当前仿真时间（毫秒），作为 GCCController 的时间戳
+    long long current_time_ms = Simulator::Now().GetMilliSeconds();
 
-    // 1. 无论如何，都先尝试接收一次，看之前是否有未收到的回复
-    // 这个操作只在 isWaitingForZmqReply 为 true 时有意义
-    if (session.isWaitingForZmqReply)
-    {
-        try {
-            zmq::message_t reply_msg;
-            if (session.zmq_socket->recv(reply_msg, zmq::recv_flags::dontwait).has_value()) {
-                // 如果成功收到回复，解析它并更新我们的状态
-                std::string reply_str(static_cast<char*>(reply_msg.data()), reply_msg.size());
-                auto reply_json = nlohmann::json::parse(reply_str);
-                uint32_t newBitrate = reply_json.at("targetBitrate").get<uint32_t>();
-                session.lastAiBitrateDecisionBps = newBitrate;
-                
-                // 关键：将等待状态置为 false，因为我们已经收到了回复
-                session.isWaitingForZmqReply = false;
-            }
-        } catch (const zmq::error_t& e) {
-            if (e.num() != EAGAIN) { // EAGAIN 是非阻塞模式下的正常“无消息”错误，不用打印
-                 NS_LOG_ERROR("ZMQ recv error for camera " << session.clientInfo.cameraId << ": " << e.what());
-            }
-        } catch (const nlohmann::json::exception& e) {
-            NS_LOG_ERROR("JSON解析错误: " << e.what());
-        }
-    }
+    // 直接调用 session 内部的 GCCController 实例来获取目标码率
+    double target_kbps = session.gccController->get_target_bitrate_kbps(
+                                throughputKbps,
+                                delay.GetMilliSeconds(), // 将 ns3::Time 转换为毫秒
+                                lossRate,
+                                delay.GetMilliSeconds(), // 对于 GCC，RTT 也可以用当前延迟
+                                current_time_ms
+                            );
     
-    // 2. 检查是否应该发送一个新的请求
-    bool shouldSend = false;
-    if (session.isWaitingForZmqReply) {
-        // 如果我们仍在等待一个回复，检查它是否超时
-        if (now > session.lastZmqRequestTime + ZMQ_REQUEST_TIMEOUT) {
-          
-            // 请求超时了！我们必须销毁并重建套接字来重置ZMQ的状态机。
-            // NS_LOG_INFO("ZMQ request for cam " << session.clientInfo.cameraId << " timed out. Resetting ZMQ socket.");
+    NS_LOG_INFO("回复摄像头 " << session.clientInfo.cameraId << ": 推荐码率 " << std::fixed << std::setprecision(2) << target_kbps << " Kbps, 网络状态: " << session.gccController->get_state_string());
 
-            // 销毁旧的套接字
-            session.zmq_socket->close();
-            // 创建一个全新的套接字
-            session.zmq_socket = std::make_unique<zmq::socket_t>(*m_zmq_context, zmq::socket_type::req);
-            
-            // 【重要】为新套接字设置一个合理的超时，防止send/recv无限期阻塞 (虽然我们用的是非阻塞)
-            int timeout_ms = 200; // 200ms
-            session.zmq_socket->set(zmq::sockopt::rcvtimeo, timeout_ms);
-            session.zmq_socket->set(zmq::sockopt::sndtimeo, timeout_ms);
+    // 更新会话中存储的上次 AI 决策码率
+    session.lastAiBitrateDecisionBps = static_cast<uint32_t>(target_kbps * 1000.0); // 将 Kbps 转换回 bps
 
-            // 重新连接
-            try {
-                session.zmq_socket->connect("tcp://localhost:5557");
-            } catch(const zmq::error_t& e) {
-                NS_LOG_ERROR("ZMQ (re)connection failed: " << e.what());
-            }
-
-            // 重置状态，允许在新的套接字上发送请求
-            session.isWaitingForZmqReply = false;
-            shouldSend = true;
-          
-        }
-    } else {
-        // 如果我们没有在等待回复，那就可以自由发送
-        shouldSend = true;
-    }
-
-    // 3. 如果决定要发送，就执行发送操作
-    if (shouldSend) {
-        nlohmann::json request_json;
-        request_json["cameraId"] = session.clientInfo.cameraId;
-        request_json["throughputKbps"] = bandwidthKbps;
-        request_json["delayMs"] = delay.GetMilliSeconds();
-        request_json["lossRate"] = lossRate;
-        std::string request_str = request_json.dump();
-
-        try {
-            zmq::message_t request_msg(request_str.begin(), request_str.end());
-            // 发送后，立刻进入等待状态，并记录发送时间
-            if(session.zmq_socket->send(request_msg, zmq::send_flags::dontwait)) {
-                session.isWaitingForZmqReply = true;
-                session.lastZmqRequestTime = now;
-            }
-        } catch (const zmq::error_t& e) {
-            NS_LOG_WARN("ZMQ send failed for camera " << session.clientInfo.cameraId << ": " << e.what());
-        }
-    }
-    
-    // 4. 无论本次操作如何，都返回AI给出的上一个有效决策
     return session.lastAiBitrateDecisionBps;
 }
-
 
 
 }
