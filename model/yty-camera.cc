@@ -155,10 +155,6 @@ void YtyCamera::StopApplication(void)
     {
         Simulator::Cancel(m_rtspRetryEvent);
     }
-    if (m_sendEvent.IsPending())
-    {
-        Simulator::Cancel(m_sendEvent);
-    }
     if (m_encoderEvent.IsPending())
     {
         Simulator::Cancel(m_encoderEvent);
@@ -236,22 +232,7 @@ void YtyCamera::ScheduleTx(void)
     }
 }
 
-void YtyCamera::SendPacket(void)
-{
-    NS_LOG_FUNCTION(this);
-    if (!m_running) return;
 
-    if (!m_sendBuffer.empty())
-    {
-        Ptr<Packet> packet = m_sendBuffer.front();
-        m_sendBuffer.pop();
-        SendRtpPacket(packet);
-        // 打印摄像头发送数据包的日志
-        // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera sent a packet of size " << packet->GetSize() << " bytes.");
-    }
-
-    // ScheduleTx();
-}
 
 void YtyCamera::SendRtpPacket(Ptr<Packet> packet)
 {
@@ -412,7 +393,6 @@ void YtyCamera::HandleRead(Ptr<Socket> socket)
 
                 // 3. 启动编码器和发送事件
                 m_encoderEvent = Simulator::ScheduleNow(&YtyCamera::Encoder, this);
-                m_sendEvent = Simulator::ScheduleNow(&YtyCamera::SendPacket, this);
             }
         }
         else 

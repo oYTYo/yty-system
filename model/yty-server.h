@@ -249,7 +249,6 @@ private:
     void ProcessRtsp(Ptr<Packet> packet, const Address& from); // 处理RTSP包
     void ScheduleReport(const Address& clientAddress); // 调度统计报告
     void SendRtcpFeedback(const Address& clientAddress); // 发送RTCP反馈
-    void Playback(const Address& clientAddress);      // 模拟播放
 
     // 播放逻辑
     void SchedulePlayback(const Address& clientAddress);
@@ -260,7 +259,6 @@ private:
     void ScheduleLog(const Address& clientAddress);
     void LogPlaybackStats(const Address& clientAddress);
 
-    uint32_t m_cameraId;    // 摄像头的唯一ID
 
     Ptr<Socket> m_socket;      // 服务器的Socket
     uint16_t m_port;           // 监听的端口

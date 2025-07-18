@@ -19,12 +19,6 @@
 
 namespace ns3 {
 
-/**
- * @brief 前向声明 BitrateSampler 类
- * 这可以在编译期间，当完整的类定义还未被解析时，提前告知编译器该类的存在，
- * 以解决循环依赖和编译顺序问题。
- */
-class BitrateSampler;
 
 class Socket;
 class Packet;
@@ -101,7 +95,6 @@ private:
     void SendEncodingParams();
 
     void ScheduleTx(void);
-    void SendPacket(void);
     void Encoder(void);
     void HandleRead(Ptr<Socket> socket);
     void SendRtpPacket(Ptr<Packet> packet);
@@ -116,9 +109,7 @@ private:
     // 帧率现在是动态可变的
     uint32_t m_frameRate;
     uint32_t m_packetSize;
-    DataRate m_sendRate;
 
-    EventId m_sendEvent;
     EventId m_encoderEvent;
     bool m_running;
 
