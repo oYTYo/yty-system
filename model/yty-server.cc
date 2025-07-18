@@ -238,18 +238,18 @@ void YtyServer::StartApplication(void)
 
 void YtyServer::StopApplication(void)
 {
-    for (auto const& [addr, session] : m_sessions) {
-        if(session.reportEvent.IsPending()) {
-            Simulator::Cancel(session.reportEvent);
-            Simulator::Cancel(session.playbackEvent);
-            Simulator::Cancel(session.stutterTimeoutEvent);
-            Simulator::Cancel(session.logStatsEvent);
-        }
+    for (auto const& [addr, session] : m_sessions)
+    {
+        Simulator::Cancel(session.reportEvent);
+        Simulator::Cancel(session.playbackEvent);
+        Simulator::Cancel(session.stutterTimeoutEvent);
+        Simulator::Cancel(session.logStatsEvent);
     }
     m_sessions.clear();
 
     if (m_logFile.is_open())
     {
+        m_logFile.flush(); 
         m_logFile.close();
     }
 
@@ -775,7 +775,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
                   << session.aiBandwidth / 1000 << "\t"   // AIBandwidth(kbps)
                   << session.resolution << "\t"           // Resolution
                   << session.crf << "\t"                  // CRF
-                  << session.actualBitrate / 1000 << std::endl; // ActualBitrate(kbps)
+                  << session.actualBitrate / 1000 << '\n'; // ActualBitrate(kbps)
     }
     
     // --- 为下一个日志周期重置所有相关的统计量 ---
