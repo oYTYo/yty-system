@@ -150,6 +150,8 @@ private:
     const int32_t m_pressureThreshold; // 触发切换的压力阈值
     const int32_t m_pressureRecoveryRate; // 压力值的自然恢复速率
 
+    bool m_initialParamsNegotiated;  // 用于标记是否已完成首次参数协商的标志
+
 };
 
 } // namespace ns3
