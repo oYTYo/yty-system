@@ -127,6 +127,7 @@ private:
         uint32_t lastReportedSentPackets; // 上次报告时，摄像头已发送的总包数
         uint32_t maxSeenSentPackets;      // 本周期内，看到的最大已发送包序号
 
+
         // --- 计时和事件调度 ---
         Time     lastReportTime;          // 上次发送报告的时间
         EventId  reportEvent;             // 统计报告事件ID
@@ -183,6 +184,9 @@ private:
 
         std::unique_ptr<GCCController> gccController;
 
+        uint64_t discardedBytesDueToStutter; // 因卡顿（过时）而丢弃的总字节数
+        uint32_t skippedFramesDueToStutter;  // 因卡顿（过时）而跳过的帧数
+
 
 
         // 构造函数
@@ -231,7 +235,10 @@ private:
 
             lastAiBitrateDecisionBps(1000000),
 
-            gccController(std::make_unique<GCCController>()) 
+            gccController(std::make_unique<GCCController>()),
+
+            discardedBytesDueToStutter(0),
+            skippedFramesDueToStutter(0)
             
         {
         }

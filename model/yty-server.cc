@@ -174,7 +174,7 @@ TypeId YtyServer::GetTypeId(void)
                       MakeUintegerAccessor(&YtyServer::m_port),
                       MakeUintegerChecker<uint16_t>())
         .AddAttribute("ReportInterval", "Interval for sending RTCP reports.",
-                      TimeValue(MilliSeconds(50)),
+                      TimeValue(MilliSeconds(500)),
                       MakeTimeAccessor(&YtyServer::m_reportInterval),
                       MakeTimeChecker())
         // 为日志记录添加新属性
@@ -231,7 +231,7 @@ void YtyServer::StartApplication(void)
     m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
     if (m_logFile.is_open())
     {
-        m_logFile << "Time(s)\tClientAddr\tThroughput(kbps)\tAvgDelay(ms)\tAvgLossRate\tAvgJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tCameraId\tAccessType\tRegion\tCodec\tAIBandwidth(kbps)\tResolution\tCRF\tActualBitrate(kbps)" << std::endl;
+        m_logFile << "Time(s)\tClientAddr\tCameraId\tThroughput(kbps)\tAvgDelay(ms)\tAvgLossRate\tAvgJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tSkippedFrames\tDiscardedBytes(kb)\tAccessType\tRegion\tCodec\tAIBandwidth(kbps)\tResolution\tCRF\tActualBitrate(kbps)" << std::endl;
     }
 }
     
@@ -270,70 +270,78 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
         // 如果是空包则跳过
         if (packet->GetSize() == 0) continue;
 
-        // 1. 创建一个临时的包副本（Copy）用于检查
-        Ptr<Packet> packetCopy = packet->Copy();
-        
-        // 2. 尝试从【副本】中解析出我们的自定义RTP头
-        RtpHeader rtpHeader;
-        uint32_t headerSize = packetCopy->RemoveHeader(rtpHeader);
+        // --- [最终的核心修正] ---
+        // 我们需要一种方法来区分RTP包和文本控制包。
+        // 之前的方法（在副本上调用RemoveHeader）仍然不安全，因为它在检查之前就尝试反序列化。
+        // 正确且安全的方法是只读取第一个字节，检查它是否是我们的RTP魔数(0xAC)。
 
-        // 3. 检查头部是否成功解析，并且魔数是否匹配
-        //    如果 headerSize > 0，说明成功解析出了一个头。
-        if (headerSize > 0 && rtpHeader.GetMagic() == 0xAC)
+        // 检查包的大小是否至少为1字节，以安全地读取第一个字节
+        if (packet->GetSize() >= 1)
         {
-             // 确认是RTP包，将【原始包】交给RTP处理器
-             ProcessRtp(packet, from);
-        }
-        else // 4. 如果不是我们定义的RTP包，那它一定是文本控制协议包
-        {
-            // 从原始包中读取文本内容
-            uint8_t buffer[256]; // 缓冲区给大一点以防万一
-            packet->CopyData(buffer, std::min((uint32_t)255, packet->GetSize()));
-            buffer[std::min((uint32_t)255, packet->GetSize())] = '\0';
-            std::string request(reinterpret_cast<char*>(buffer));
-            
-            // 根据请求的字符串内容进行分发
-            if (request.rfind("PLAY", 0) == 0 || request.rfind("TEARDOWN", 0) == 0) {
-                // 是标准RTSP请求，将【原始包】交给RTSP处理器
-                ProcessRtsp(packet, from);
+            uint8_t magicNumber;
+            // CopyData是安全的，它只复制指定数量的字节到缓冲区，不会修改原始包
+            packet->CopyData(&magicNumber, 1);
+
+            // 检查这个字节是否是RTP包的魔数
+            if (magicNumber == 0xAC)
+            {
+                // 魔数匹配，这几乎可以肯定是我们的RTP包。
+                // 现在我们可以安全地把它交给RTP处理器，它会在内部调用RemoveHeader。
+                ProcessRtp(packet, from);
             }
-            else if (request.rfind("SET_PARAMS", 0) == 0) {
-                // 是我们自定义的 SET_PARAMS 请求，直接在此处理
-                if (m_sessions.count(from)) {
-                    ClientSession& session = m_sessions[from];
-                    
-                    // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server received SET_PARAMS from " << InetSocketAddress::ConvertFrom(from).GetIpv4());
+            else
+            {
+                // 魔数不匹配，这必定是一个文本控制包。
+                // 按原样处理文本消息。
+                uint8_t buffer[256];
+                packet->CopyData(buffer, std::min((uint32_t)255, packet->GetSize()));
+                buffer[std::min((uint32_t)255, packet->GetSize())] = '\0'; // 确保字符串正确终止
+                std::string request(reinterpret_cast<char*>(buffer));
 
-                    // --- 【核心修正】使用更健壮的解析逻辑 ---
-                    std::istringstream requestStream(request);
-                    std::string line;
-                    while (std::getline(requestStream, line))
-                    {
-                        // 去除行尾的 \r 
-                        if (!line.empty() && line.back() == '\r') {
-                            line.pop_back();
-                        }
+                // 现在，我们可以安全地根据字符串内容进行分发。
+                if (request.rfind("PLAY", 0) == 0 || request.rfind("TEARDOWN", 0) == 0)
+                {
+                    ProcessRtsp(packet, from);
+                }
 
-                        std::string header_res = "X-Resolution: ";
-                        std::string header_crf = "X-CRF: ";
-                        std::string header_br = "X-Actual-Bitrate: ";
+                else if (request.rfind("SET_PARAMS", 0) == 0)
+                {
+                    // 处理来自摄像头的参数更新
+                    if (m_sessions.count(from)) {
+                        ClientSession& session = m_sessions[from];
+                        std::istringstream requestStream(request);
+                        std::string line;
+                        while (std::getline(requestStream, line))
+                        {
+                            if (!line.empty() && line.back() == '\r') {
+                                line.pop_back();
+                            }
+                            std::string header_res = "X-Resolution: ";
+                            std::string header_crf = "X-CRF: ";
+                            std::string header_br = "X-Actual-Bitrate: ";
 
-                        if (line.rfind(header_res, 0) == 0) {
-                            session.resolution = line.substr(header_res.length());
-                        }
-                        else if (line.rfind(header_crf, 0) == 0) {
-                            session.crf = std::stoul(line.substr(header_crf.length()));
-                        }
-                        else if (line.rfind(header_br, 0) == 0) {
-                            session.actualBitrate = std::stoul(line.substr(header_br.length()));
+                            if (line.rfind(header_res, 0) == 0) {
+                                session.resolution = line.substr(header_res.length());
+                            }
+                            else if (line.rfind(header_crf, 0) == 0) {
+                                session.crf = std::stoul(line.substr(header_crf.length()));
+                            }
+                            else if (line.rfind(header_br, 0) == 0) {
+                                session.actualBitrate = std::stoul(line.substr(header_br.length()));
+                            }
                         }
                     }
-                   
+                }
+                else
+                {
+                     NS_LOG_WARN("收到一个未知类型的控制包，来自 " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ", 内容: " << request);
                 }
             }
-            else {
-                 NS_LOG_WARN("Received an unknown control packet from " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ", content: " << request);
-            }
+        }
+        else
+        {
+            // 包的大小甚至小于1字节，这不太可能发生，但作为健壮性检查，我们将其视为未知包。
+            NS_LOG_WARN("收到一个大小小于1字节的包，已忽略。");
         }
     }
 }
@@ -359,6 +367,7 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
     if (frameSeq < session.nextFrameToPlay)
     {
         // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server discarded an old packet for frame " << frameSeq << " (expecting frame " << session.nextFrameToPlay << ").");
+        session.discardedBytesDueToStutter += packet->GetSize(); // 累加过时丢弃的字节
         return; // 丢弃过时的包，函数直接返回
     }
 
@@ -553,73 +562,53 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
         return;
     }
 
-    // --- 1. 计算网络状态 (与之前相同) ---
-    Time avgDelay = (session.intervalReceivedPackets > 0) ? session.intervalTotalDelay / session.intervalReceivedPackets : Seconds(0);
+  
+    // 1. 计算在这个统计周期内，发送端总共发送了多少个包。
+    //    maxSeenSentPackets 是这个周期内收到的RTP包头里最大的全局序号。
+    //    lastReportedSentPackets 是上个周期记录的最大全局序号。
+    //    它们的差值，就是这个周期内发送端发出的总包数。
     uint32_t intervalSent = session.maxSeenSentPackets - session.lastReportedSentPackets;
+
     double lossRate = 0.0;
     if (intervalSent > 0)
     {
-        uint64_t receivedInInterval = std::min((uint64_t)intervalSent, session.intervalReceivedPackets);
-        lossRate = 1.0 - (double)receivedInInterval / intervalSent;
+        // intervalReceivedPackets 是这个周期内实际收到的总包数。
+        // 这个值是通过在 ProcessRtp 中对每个到达的包计数得来的，是绝对准确的。
+        lossRate = 1.0 - (double)session.intervalReceivedPackets / intervalSent;
     }
+    // 安全检查，确保丢包率不会是负数（可能由于乱序导致 maxSeenSentPackets 更新延迟）
     if (lossRate < 0) lossRate = 0.0;
-
-    // --- 2. 【新增】乐观带宽探测逻辑 ---
-    // 定义触发探测的阈值
-    const double PROBE_LOSS_RATE_THRESHOLD = 0.001; // 丢包率低于 0.1%
-    const Time   PROBE_DELAY_THRESHOLD     = MilliSeconds(10); // 延迟低于 10ms
     
-    // 从摄像头最新的参数报告中获取其当前的发送码率
-    double currentActualBitrateKbps = session.actualBitrate / 1000.0;
-
-    // 获取AI上一次给出的建议带宽
-    double lastAiBandwidthKbps = session.aiBandwidth / 1000.0;
-
-    // 决定本次要报告给AI的带宽值
+    // --- 后续的拥塞控制和发送反馈逻辑保持不变 ---
+    Time avgDelay = (session.intervalReceivedPackets > 0) ? session.intervalTotalDelay / session.intervalReceivedPackets : Seconds(0);
     double bandwidthToReportKbps = session.lastThroughputKbpsForAI;
-    
-    // 检查是否满足“信息饥饿”条件
-    if (lossRate < PROBE_LOSS_RATE_THRESHOLD && avgDelay < PROBE_DELAY_THRESHOLD)
+    if (lossRate < 0.001 && avgDelay < MilliSeconds(10))
     {
-        // 网络状况极好，但吞吐量可能很低，需要主动探测
-        // NS_LOG_INFO("Camera " << session.clientInfo.cameraId << ": Network is perfect (loss=" << lossRate << ", delay=" << avgDelay.GetMilliSeconds() << "ms). Activating optimistic probing.");
-        
-        // 我们选择一个更激进的值来报告给AI，鼓励它提速
-        // 这个值可以是当前摄像头实际发送码率的1.25倍，或者是AI上次建议带宽的1.25倍，取较大者
-        double optimisticBw = std::max(currentActualBitrateKbps, lastAiBandwidthKbps) * 1.25;
-
-        // 确保探测值至少比当前测得的吞吐量大
+        double optimisticBw = std::max(session.actualBitrate / 1000.0, session.aiBandwidth / 1000.0) * 1.25;
         bandwidthToReportKbps = std::max(session.lastThroughputKbpsForAI, optimisticBw);
     }
-
-    // --- 3. 调用AI模块获取可用带宽，注意：传入的是我们处理过的带宽值 ---
     uint32_t aiBandwidth = GetBitrateFromGCC(session, bandwidthToReportKbps, avgDelay, lossRate);
-
-    // +++ 将AI给出的带宽建议存入会话，以便日志记录 +++
     session.aiBandwidth = aiBandwidth;
-
-    // --- 4. 将服务器计算出的【可用带宽】发送回摄像头 ---
     Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&aiBandwidth), sizeof(uint32_t));
-
     m_socket->SendTo(rtcpPacket, 0, clientAddress);
 
-
-    // 将当前计算出的指标累加到日志统计变量中
+    // --- 重置统计数据，为下一个周期做准备 ---
     session.logIntervalSumDelay += avgDelay;
     session.logIntervalSumLossRate += lossRate;
-    session.logIntervalSumJitter += session.jitter; // 累加当前计算的抖动值
+    session.logIntervalSumJitter += session.jitter;
     session.logIntervalRtcpCount++;
 
-
-    // --- 4. 重置周期统计数据 (与之前相同) ---
     session.intervalReceivedPackets = 0;
     session.intervalReceivedBytes = 0;
     session.intervalTotalDelay = Seconds(0);
-    session.lastReportedSentPackets = session.maxSeenSentPackets;
     session.lastReportTime = now;
+    
+    // 将本周期看到的最大序列号，保存起来，作为下个周期的计算基准。
+    session.lastReportedSentPackets = session.maxSeenSentPackets;
 
     ScheduleReport(clientAddress);
 }
+
 
 
 // --- 新的播放和日志记录函数 ---
@@ -700,14 +689,18 @@ void YtyServer::HandleStutter(const Address& clientAddress)
     // 在跳过这一帧之前，必须将其已缓存的数据从抖动缓冲区中清除。这是防止数据结构无限增长、导致仿真速度变慢的关键。
     uint32_t frameToClean = session.nextFrameToPlay;
     if (session.buffer.count(frameToClean))
-    {
+    {   
+        // 累加被丢弃帧的字节数
+        for (const auto& pair : session.buffer[frameToClean]) {
+            session.discardedBytesDueToStutter += pair.second.packet->GetSize();
+        }
         // 从 map 中删除这个永远不会被播放的帧的所有相关数据。
         session.buffer.erase(frameToClean);
         NS_LOG_INFO("从缓冲区中删掉帧 " << frameToClean << " 避免持续累积.");
     }
-    // ====================== 【核心修正】 结束 ======================
 
     session.stutterEvents++;
+    session.skippedFramesDueToStutter++; // 统计跳过的帧数
     session.nextFrameToPlay++; // 跳过迟到的帧
 
     // 跳过之后，立即尝试播放下一帧。
@@ -765,7 +758,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     {
         m_logFile << Simulator::Now().GetSeconds() << "\t"
                   << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << "\t" // ClientAddr
-                  // ▼▼▼ 请确认此行代码 ▼▼▼
+                  << session.clientInfo.cameraId << "\t"  // CameraId
                   << throughputKbps << "\t"             // Throughput(kbps) - 直接使用已是Kbps单位的变量，无需再除1000
                   << avgDelayMs << "\t"                 // AvgDelay(ms)
                   << avgLossRate << "\t"                // AvgLossRate
@@ -773,7 +766,9 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
                   << session.playedFrames << "\t"       // PlayedFrames
                   << session.stutterEvents << "\t"      // StutterEvents
                   << stutterRate << "\t"                 // StutterRate
-                  << session.clientInfo.cameraId << "\t"  // CameraId
+                  << session.skippedFramesDueToStutter << "\t" // 跳过的帧数
+                  << session.discardedBytesDueToStutter / 1000 << "\t" // 因卡顿丢弃的字节数 (kb)
+                 
                   << session.clientInfo.accessType << "\t"// AccessType
                   << session.clientInfo.region << "\t"    // Region
                   << session.clientInfo.codec << "\t"     // Codec
@@ -792,6 +787,8 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     session.logIntervalRtcpCount = 0;
     session.logIntervalReceivedBytes = 0;
     session.logIntervalStartTime = Simulator::Now();
+    session.skippedFramesDueToStutter = 0;
+    session.discardedBytesDueToStutter = 0;
 
     // 安排下一次日志事件
     ScheduleLog(clientAddress);
@@ -812,7 +809,7 @@ uint32_t YtyServer::GetBitrateFromGCC(ClientSession& session, double throughputK
                                 current_time_ms
                             );
     
-    NS_LOG_INFO("回复摄像头 " << session.clientInfo.cameraId << ": 推荐码率 " << std::fixed << std::setprecision(2) << target_kbps << " Kbps, 网络状态: " << session.gccController->get_state_string());
+    // NS_LOG_INFO("回复摄像头 " << session.clientInfo.cameraId << ": 推荐码率 " << std::fixed << std::setprecision(2) << target_kbps << " Kbps, 网络状态: " << session.gccController->get_state_string());
 
     // 更新会话中存储的上次 AI 决策码率
     session.lastAiBitrateDecisionBps = static_cast<uint32_t>(target_kbps * 1000.0); // 将 Kbps 转换回 bps

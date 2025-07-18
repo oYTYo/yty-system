@@ -44,7 +44,7 @@ public:
     virtual void Serialize(Buffer::Iterator start) const;
     virtual uint32_t Deserialize(Buffer::Iterator start);
 
-    // +++ 【新增】用于识别RTP包的魔数 +++
+    // +++ 用于识别RTP包的魔数 +++
     void SetMagic(uint8_t magic) { m_magic = magic; }
     uint8_t GetMagic() const { return m_magic; }
 
@@ -108,6 +108,7 @@ private:
     void SendRtspRequest(std::string method);
 
 
+
     Ptr<Socket> m_socket;
     Address m_peerAddress;
     uint16_t m_peerPort;
@@ -120,6 +121,7 @@ private:
     EventId m_sendEvent;
     EventId m_encoderEvent;
     bool m_running;
+
 
     std::queue<Ptr<Packet>> m_sendBuffer;
 

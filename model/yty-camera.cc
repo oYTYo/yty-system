@@ -161,6 +161,7 @@ void YtyCamera::StartApplication(void)
     
     // SendRtspRequest("PLAY");
     SendPlayRequestAndScheduleRetry();
+
 }
 
 
@@ -171,11 +172,10 @@ void YtyCamera::StopApplication(void)
 
     SendRtspRequest("TEARDOWN");
 
-    if (m_rtspRetryEvent.IsPending()) // <<< 新增
+    if (m_rtspRetryEvent.IsPending())
     {
         Simulator::Cancel(m_rtspRetryEvent);
     }
-
     if (m_sendEvent.IsPending())
     {
         Simulator::Cancel(m_sendEvent);
@@ -209,16 +209,20 @@ void YtyCamera::Encoder(void)
     uint32_t frameSizeBytes = m_actualBitrate / (8 * m_frameRate);
     uint32_t numPacketsInFrame = (frameSizeBytes + m_packetSize - 1) / m_packetSize;
 
+    uint32_t bytesSentInFrame = 0;
     for (uint32_t i = 0; i < numPacketsInFrame; ++i)
     {
-        Ptr<Packet> packet = Create<Packet>(m_packetSize);
+        // 计算当前这个包应该有的大小
+        uint32_t packetPayloadSize = std::min((uint32_t)m_packetSize, frameSizeBytes - bytesSentInFrame);
+        if (packetPayloadSize == 0) continue; // 防止产生0字节的包
+
+        Ptr<Packet> packet = Create<Packet>(packetPayloadSize);
+        bytesSentInFrame += packetPayloadSize;
         
         m_cumulativePacketsSent++;
 
         RtpHeader rtpHeader;
-        // +++ 【核心修正】为每个RTP包设置魔数 +++
         rtpHeader.SetMagic(0xAC);
-        
         rtpHeader.SetTimestamp(Simulator::Now().GetNanoSeconds());
         rtpHeader.SetFrameSeq(m_frameSeqCounter);
         rtpHeader.SetPacketSeq(i);
@@ -228,13 +232,9 @@ void YtyCamera::Encoder(void)
         packet->AddHeader(rtpHeader);
         m_sendBuffer.push(packet);
     }
-    // 打印摄像头的编码信息
-    // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera " << m_cameraId << " encoded frame " << m_frameSeqCounter << " with " << numPacketsInFrame << " packets. (Bitrate: " << m_actualBitrate/1000 << "kbps, FPS: " << m_frameRate << ")");
-
     m_frameSeqCounter++;
 
-    // 更新发送速率，以便 ScheduleTx 使用
-    m_sendRate = DataRate(numPacketsInFrame * m_packetSize * 8 * m_frameRate);
+    ScheduleTx(); 
 
     // 安排下一次编码事件
     Time nextEncodeTime = Seconds(1.0 / m_frameRate);
@@ -242,19 +242,18 @@ void YtyCamera::Encoder(void)
 }
 
 
+// 它不再是调度单个包，而是循环发送，直到缓冲区为空。
 void YtyCamera::ScheduleTx(void)
 {
-    if (m_running)
+    if (m_running && !m_sendBuffer.empty())
     {
+        // 从缓冲区取出一个包并发送
+        Ptr<Packet> packet = m_sendBuffer.front();
+        m_sendBuffer.pop();
+        m_socket->Send(packet);
 
-        if (m_sendRate == DataRate(0)) {
-            // 如果速率为0（比如码率采样为0），则不需要频繁调度发送
-            // 可以在Encoder中重新启动它
-        return;
-        }
-
-        Time txInterval = m_sendRate.CalculateBytesTxTime(m_packetSize);
-        m_sendEvent = Simulator::Schedule(txInterval, &YtyCamera::SendPacket, this);
+        // 只要缓冲区不为空，就立即安排下一次发送（在仿真时间上是“立刻”）
+        Simulator::ScheduleNow(&YtyCamera::ScheduleTx, this);
     }
 }
 
@@ -272,7 +271,7 @@ void YtyCamera::SendPacket(void)
         // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera sent a packet of size " << packet->GetSize() << " bytes.");
     }
 
-    ScheduleTx();
+    // ScheduleTx();
 }
 
 void YtyCamera::SendRtpPacket(Ptr<Packet> packet)
@@ -455,5 +454,6 @@ void YtyCamera::SendPlayRequestAndScheduleRetry()
     // 安排1秒后再次尝试
     m_rtspRetryEvent = Simulator::Schedule(Seconds(1.0), &YtyCamera::SendPlayRequestAndScheduleRetry, this);
 }
+
 
 } // namespace ns3
