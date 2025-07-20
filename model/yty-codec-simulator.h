@@ -74,7 +74,6 @@ private:
     
     std::string m_codecType;
     std::vector<CodecDataEntry> m_codecDb; // 存储编码参数的数据库
-    std::vector<int> m_frameRates;         // 支持的帧率列表 (降序)
     std::vector<std::pair<int, int>> m_resolutions; // 支持的分辨率列表 (降序)
 
     // 用于获取分辨率的索引，方便查找上一档/下一档
