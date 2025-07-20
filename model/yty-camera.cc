@@ -327,22 +327,21 @@ void YtyCamera::UpdateEncodingParameters(uint32_t bandwidthBps)
 
     if(final_params.found) {
         // --- [核心逻辑检查] ---
-        // 检查参数是否真的改变了。注意，第一次更新时 m_resolution 是 "N/A"，所以一定会触发更新。
-        bool paramsChanged = (m_resolution != final_params.resolution || 
-                              m_frameRate != (uint32_t)final_params.frame_rate || 
-                              m_crf != (uint32_t)final_params.crf);
+        // 检查是否有任何参数发生了变化。
+        bool anyParamsChanged = (m_resolution != final_params.resolution ||
+                                 m_frameRate != (uint32_t)final_params.frame_rate ||
+                                 m_crf != (uint32_t)final_params.crf);
 
+        // 更新摄像头的内部状态。
         m_resolution = final_params.resolution;
         m_frameRate = final_params.frame_rate;
         m_crf = final_params.crf;
         m_actualBitrate = final_params.actual_bitrate_kbps * 1000; // 转换回 bps
 
-
-        // 现在只要参数变化就上报，不再需要 shouldSendUpdate 变量
-        if (paramsChanged) {
+        // 只要有任何参数变化，就通过 SET_PARAMS 通知服务器记录日志。
+        // 【重要】不再发送 PLAY 请求进行重协商。
+        if (anyParamsChanged) {
             SendEncodingParams();
-            // 如果是参数真的变化了，需要通过PLAY请求重新协商帧率
-            SendRtspRequest("PLAY");
         }
     } else {
         NS_LOG_WARN("Camera " << m_cameraId << " 这个带宽下没有合适的视频参数 " << target_kbps << "kbps.");

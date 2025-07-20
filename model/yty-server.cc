@@ -442,89 +442,54 @@ void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
     std::string request(reinterpret_cast<char*>(buffer));
 
     if (request.rfind("PLAY", 0) == 0)
-    {   
+    {
         Ipv4Address clientIp = InetSocketAddress::ConvertFrom(from).GetIpv4();
-        NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server received PLAY request from " << clientIp);
-        if (m_sessions.find(from) == m_sessions.end())
+
+        // --- 【最终简化逻辑】 ---
+        // 如果会话已经存在，那么这个 PLAY 请求就是一个（现在我们已决定忽略的）重协商请求。
+        // 直接返回，不做任何处理，不重置会话，不打断播放。
+        if (m_sessions.count(from))
         {
-            // m_sessions[from] = ClientSession();
-            // m_sessions[from].lastReportTime = Simulator::Now();
-
-            // 从注册表查找信息
-            auto it = m_clientInfoRegistry.find(clientIp);
-            if (it == m_clientInfoRegistry.end())
-            {
-                NS_LOG_WARN("Server received PLAY from an unregistered IP: " << clientIp << ". Ignoring.");
-                return;
-            }
-            m_sessions[from] = ClientSession();
-            ClientSession& session = m_sessions[from];
-            session.lastReportTime = Simulator::Now();
-            // 将预先注册的信息填充到当前会话中
-            session.clientInfo = it->second; 
-
-            // 给一个还不错的初始吞吐量
-            session.lastThroughputKbpsForAI = 2000.0;
-
-
-
-
-            // --- 新增：解析帧率 ---
-            std::string header_key = "X-Frame-Rate: ";
-            size_t pos = request.find(header_key);
-            if (pos != std::string::npos)
-            {
-                // 提取帧率字符串并转换为整数
-                std::string rate_str = request.substr(pos + header_key.length());
-                try {
-                    uint32_t negotiatedRate = std::stoul(rate_str);
-                    m_sessions[from].frameRate = negotiatedRate;
-                    NS_LOG_INFO("Negotiated frame rate with " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ": " << negotiatedRate << " fps");
-
-                    // 在这里计算并存储超时时长 ▼▼▼
-                    if (negotiatedRate > 0) {
-                        // 使用1.5倍帧间隔作为超时，增加网络抖动容忍度
-                        m_sessions[from].stutterTimeout = MilliSeconds(2000 / negotiatedRate);
-                    }
-
-                    // 如果帧率发生变化，则立即重置播放调度
-                    if (session.playbackEvent.IsPending() && negotiatedRate > 0)
-                    {
-                        // 如果播放事件正在运行（意味着这不是第一次PLAY），并且我们收到了一个有效的新帧率
-                        NS_LOG_INFO("Frame rate changed for " << clientIp << ". Rescheduling playback event.");
-                        Simulator::Cancel(session.playbackEvent); // 取消基于旧帧率的播放计划
-                        session.playbackEvent = Simulator::Schedule(Seconds(1.0 / negotiatedRate), &YtyServer::TryPlayback, this, from); // 立即用新帧率安排下一次播放
-                    }
-                    
-                } catch (const std::exception& e) {
-                    NS_LOG_WARN("没有成功解析出帧率，使用默认值: " << m_sessions[from].frameRate);
-                }
-            }
-            else
-            {
-                NS_LOG_INFO("报头没有帧率，使用默认值: " << m_sessions[from].frameRate);
-            }
-            // --- 解析结束 ---
-
-            // --- 【新增】解析Codec ---
-            std::string codec_header_key = "X-Codec: ";
-            size_t codec_pos = request.find(codec_header_key);
-            if (codec_pos != std::string::npos)
-            {
-                size_t end_pos = request.find("\r\n", codec_pos);
-                m_sessions[from].clientInfo.codec = request.substr(codec_pos + codec_header_key.length(), end_pos - (codec_pos + codec_header_key.length()));
-                NS_LOG_INFO("Negotiated codec with " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ": " << m_sessions[from].clientInfo.codec);
-            }
-            else
-            {
-                // 如果请求中没有codec信息，则使用注册时提供的信息
-                NS_LOG_INFO("No codec header found. Using registered codec: " << m_sessions[from].clientInfo.codec);
-            }
-            // --- 解析结束 ---
-
-            // --- 启动播放和日志记录 ---
-            SchedulePlayback(from);
+            NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server ignored subsequent PLAY request from existing session: " << clientIp);
+            return; // 直接返回，忽略该请求
         }
+
+        // 只有在会话不存在时（即第一次收到PLAY请求），才创建新会话。
+        NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server received initial PLAY request from " << clientIp << ". Creating new session.");
+        m_sessions[from] = ClientSession();
+        ClientSession& session = m_sessions[from];
+
+        // --- 使用固定的播放参数，不再解析请求 ---
+        const uint32_t FIXED_FRAME_RATE = 30;
+        session.frameRate = FIXED_FRAME_RATE;
+        // 根据固定帧率计算一个合理的卡顿超时（例如1.5倍帧间隔）
+        session.stutterTimeout = MilliSeconds(1500.0 / FIXED_FRAME_RATE);
+        NS_LOG_INFO("Session for " << clientIp << " created with fixed playback rate: 30 fps.");
+
+
+        // --- 原有的会话初始化代码（保持不变） ---
+        session.lastReportTime = Simulator::Now();
+        auto it = m_clientInfoRegistry.find(clientIp);
+        if (it == m_clientInfoRegistry.end())
+        {
+            NS_LOG_WARN("Server received PLAY from an unregistered IP: " << clientIp << ". Ignoring.");
+            m_sessions.erase(from); // 创建了就删掉
+            return;
+        }
+        session.clientInfo = it->second;
+        session.lastThroughputKbpsForAI = 2000.0; // 给予一个初始带宽
+
+        // --- 解析Codec（这个可以保留，因为它不影响播放节奏） ---
+        std::string codec_header_key = "X-Codec: ";
+        size_t codec_pos = request.find(codec_header_key);
+        if (codec_pos != std::string::npos)
+        {
+            size_t end_pos = request.find("\r\n", codec_pos);
+            session.clientInfo.codec = request.substr(codec_pos + codec_header_key.length(), end_pos - (codec_pos + codec_header_key.length()));
+        }
+
+        // 启动播放和统计报告
+        SchedulePlayback(from);
         ScheduleReport(from);
     }
     else if (request.rfind("TEARDOWN", 0) == 0)
