@@ -30,7 +30,7 @@ NS_OBJECT_ENSURE_REGISTERED(YtyServer);
 
 
 // 码率的绝对上限和下限，防止码率无限增长或低到无意义
-const double MAX_BITRATE_MBPS = 10.0; // 码率最高不超过 10 Mbps
+const double MAX_BITRATE_MBPS = 25.0; // 码率最高不超过 10 Mbps
 const double MIN_BITRATE_KBPS = 100.0; // 码率最低不低于 100 Kbps
 
 // 单位换算常量

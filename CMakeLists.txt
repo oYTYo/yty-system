@@ -36,6 +36,7 @@ build_lib(
     ${libinternet}
     ${libapplications}
     Threads::Threads
+    ${libai} # 链接 ns3-ai 模块
 )
 
 # 5. 告诉编译器去哪里寻找头文件 (.h)
