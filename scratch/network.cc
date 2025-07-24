@@ -85,6 +85,15 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
 
 int main(int argc, char* argv[])
 {
+
+    // --- [新增] AI模式开关 ---
+    bool useAI = true;
+    CommandLine cmd;
+    // 添加一个命令行参数 --useAI，可以接受 true 或 false
+    cmd.AddValue("useAI", "Enable AI-based congestion control", useAI);
+    cmd.Parse(argc, argv);
+
+
     // --- 仿真核心参数 ---
     const uint32_t REGION_COUNT              = 1;    // 区域数量
     const uint32_t WIRED_CAM_PER_REGION      = 30;   // 每个区域的有线摄像头数量
@@ -552,7 +561,7 @@ int main(int argc, char* argv[])
     LogComponentEnable("YtyServerApplication", LOG_LEVEL_INFO);
     YtyServerHelper serverHelper(serverPort);
     serverHelper.SetAttribute("LogFile", StringValue("scratch/play_status_large_scale.txt"));
-
+    serverHelper.SetAttribute("UseAI", BooleanValue(useAI));
 
     ApplicationContainer serverApps = serverHelper.Install(serverNode.Get(0));
     serverApps.Start(Seconds(1.0));
