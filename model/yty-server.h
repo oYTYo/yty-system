@@ -11,6 +11,8 @@
 
 #include "ns3/ipv4-address.h"
 
+#include "zmq.hpp"
+
 #include <map>
 #include <vector>
 #include <fstream>
@@ -57,7 +59,7 @@ private:
     NetworkState state_;
     long long time_of_last_bitrate_increase_ms_;
 
-    // --- 算法实现：内部辅助方法 ---
+    // --- GCC实现：内部辅助方法 ---
     std::string loss_based_control(double loss_rate);
     std::string delay_based_control(double delay_ms, long long current_time_ms);
     void update_bitrate(const std::string& loss_decision, const std::string& delay_decision, double rtt_ms, long long current_time_ms);
@@ -103,6 +105,12 @@ protected:
     virtual void DoDispose(void);
 
 private:
+
+    // zmq通信
+    bool m_useAI; // AI模式的开关
+    std::unique_ptr<zmq::context_t> m_zmq_context; // ZMQ的全局上下文
+    std::map<Address, std::unique_ptr<zmq::socket_t>> m_zmq_sockets; // 每个客户端一个独立的ZMQ socket
+
     virtual void StartApplication(void);
     virtual void StopApplication(void);
 
@@ -276,8 +284,11 @@ private:
     // 将每个客户端的IP地址映射到其完整的元数据
     std::map<Ipv4Address, ClientInfo> m_clientInfoRegistry;
   
-
-    uint32_t GetBitrateFromGCC(ClientSession& session, double throughput, Time delay, double lossRate);
+    // 不再仅仅是从GCC获取，而是获取最终的目标码率
+    uint32_t GetTargetBitrate(ClientSession& session, double throughputKbps, Time delay, double lossRate);
+    
+    // 一个专门用于和Python AI通信的函数
+    uint32_t GetBitrateFromAI(ClientSession& session, double throughputKbps, Time delay, double lossRate, const Address& from);
     
 };
 

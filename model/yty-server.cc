@@ -2,6 +2,7 @@
 
 #include "yty-server.h"
 #include "ns3/log.h"
+#include "ns3/boolean.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/nstime.h"
 #include "ns3/inet-socket-address.h"
@@ -22,6 +23,10 @@
 #include <algorithm>
 #include <iomanip>
 
+
+#include <nlohmann/json.hpp>
+// 为方便使用，创建一个别名
+using json = nlohmann::json;
 
 namespace ns3 {
 
@@ -185,13 +190,29 @@ TypeId YtyServer::GetTypeId(void)
         .AddAttribute("LogInterval", "Interval for logging playback stats.",
                       TimeValue(Seconds(1.0)),
                       MakeTimeAccessor(&YtyServer::m_logInterval),
-                      MakeTimeChecker());
+                      MakeTimeChecker())
+        .AddAttribute("UseAI", "Enable AI-based congestion control via ZMQ.",
+                      BooleanValue(false), // 默认关闭AI模式
+                      MakeBooleanAccessor(&YtyServer::m_useAI),
+                      MakeBooleanChecker());
     return tid;
 }
 
-YtyServer::YtyServer() : m_socket(0), m_port(9) {}
 
-YtyServer::~YtyServer() { m_socket = 0; }
+YtyServer::YtyServer() : m_useAI(false), m_socket(0), m_port(9) 
+{
+    // 如果启用了AI模式，则初始化ZMQ上下文
+    if (m_useAI) {
+        m_zmq_context = std::make_unique<zmq::context_t>(1);
+    }
+}
+
+YtyServer::~YtyServer() { 
+    // 清理 ZMQ sockets
+    m_zmq_sockets.clear();
+    m_socket = 0; 
+}
+
 
 void YtyServer::DoDispose(void)
 {
@@ -216,6 +237,14 @@ void YtyServer::RegisterClientInfo(const Ipv4Address& clientIp, const ClientInfo
 
 void YtyServer::StartApplication(void)
 {
+    // 在启动时重新检查并初始化ZMQ上下文
+    if (m_useAI && !m_zmq_context) {
+        m_zmq_context = std::make_unique<zmq::context_t>(1);
+        NS_LOG_INFO("开启了AI通信");
+    } else {
+        NS_LOG_INFO("没有开启AI通信，使用GCC");
+    }
+
     if (!m_socket)
     {
         TypeId tid = TypeId::LookupByName("ns3::UdpSocketFactory");
@@ -245,7 +274,13 @@ void YtyServer::StopApplication(void)
         Simulator::Cancel(session.stutterTimeoutEvent);
         Simulator::Cancel(session.logStatsEvent);
     }
-    m_sessions.clear();
+
+    m_zmq_sockets.clear(); 
+    if(m_zmq_context) {
+        m_zmq_context->close();
+    }
+
+    m_sessions.clear(); 
 
     if (m_logFile.is_open())
     {
@@ -552,9 +587,13 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
         double optimisticBw = std::max(session.actualBitrate / 1000.0, session.aiBandwidth / 1000.0) * 1.25;
         bandwidthToReportKbps = std::max(session.lastThroughputKbpsForAI, optimisticBw);
     }
-    uint32_t aiBandwidth = GetBitrateFromGCC(session, bandwidthToReportKbps, avgDelay, lossRate);
-    session.aiBandwidth = aiBandwidth;
-    Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&aiBandwidth), sizeof(uint32_t));
+
+
+    // 这个函数会根据m_useAI标志自动选择GCC或AI
+    uint32_t targetBitrateBps = GetTargetBitrate(session, bandwidthToReportKbps, avgDelay, lossRate);
+    session.aiBandwidth = targetBitrateBps; // 更新用于日志的aiBandwidth字段
+
+    Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&targetBitrateBps), sizeof(uint32_t));
     m_socket->SendTo(rtcpPacket, 0, clientAddress);
 
     // --- 重置统计数据，为下一个周期做准备 ---
@@ -760,27 +799,96 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 }
 
 
-uint32_t YtyServer::GetBitrateFromGCC(ClientSession& session, double throughputKbps, Time delay, double lossRate)
+// 如果开启了AI模型就用AI模型，没有开启就用GCC
+uint32_t YtyServer::GetTargetBitrate(ClientSession& session, double throughputKbps, Time delay, double lossRate)
 {
-    // 获取当前仿真时间（毫秒），作为 GCCController 的时间戳
-    long long current_time_ms = Simulator::Now().GetMilliSeconds();
-
-    // 直接调用 session 内部的 GCCController 实例来获取目标码率
-    double target_kbps = session.gccController->get_target_bitrate_kbps(
-                                throughputKbps,
-                                delay.GetMilliSeconds(), // 将 ns3::Time 转换为毫秒
-                                lossRate,
-                                delay.GetMilliSeconds(), // 对于 GCC，RTT 也可以用当前延迟
-                                current_time_ms
-                            );
-    
-    // NS_LOG_INFO("回复摄像头 " << session.clientInfo.cameraId << ": 推荐码率 " << std::fixed << std::setprecision(2) << target_kbps << " Kbps, 网络状态: " << session.gccController->get_state_string());
-
-    // 更新会话中存储的上次 AI 决策码率
-    session.lastAiBitrateDecisionBps = static_cast<uint32_t>(target_kbps * 1000.0); // 将 Kbps 转换回 bps
-
-    return session.lastAiBitrateDecisionBps;
+    // 如果AI模式开启，则通过ZMQ从Python脚本获取码率
+    if (m_useAI)
+    {
+        // 找到该客户端对应的地址
+        Address clientAddress;
+        for (auto const& [addr, s] : m_sessions) {
+            // 注意：这里用clientInfo.cameraId比较，因为我们只知道session
+            if (s.clientInfo.cameraId == session.clientInfo.cameraId) {
+                clientAddress = addr;
+                break;
+            }
+        }
+        return GetBitrateFromAI(session, throughputKbps, delay, lossRate, clientAddress);
+    }
+    // 否则，使用内置的GCC算法
+    else
+    {
+        long long current_time_ms = Simulator::Now().GetMilliSeconds();
+        double target_kbps = session.gccController->get_target_bitrate_kbps(
+                                    throughputKbps,
+                                    delay.GetMilliSeconds(),
+                                    lossRate,
+                                    delay.GetMilliSeconds(), // RTT用延迟近似
+                                    current_time_ms
+                                );
+        session.lastAiBitrateDecisionBps = static_cast<uint32_t>(target_kbps * 1000.0);
+        return session.lastAiBitrateDecisionBps;
+    }
 }
+
+
+// 实现与AI的通信函数
+uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double throughputKbps, Time delay, double lossRate, const Address& from)
+{
+    // 检查此客户端是否已经有ZMQ socket，如果没有则创建一个
+    if (m_zmq_sockets.find(from) == m_zmq_sockets.end()) {
+        NS_LOG_INFO("Creating new ZMQ REQ socket for client " << session.clientInfo.cameraId);
+        m_zmq_sockets[from] = std::make_unique<zmq::socket_t>(*m_zmq_context, ZMQ_REQ);
+        m_zmq_sockets[from]->connect("tcp://localhost:5556");
+    }
+
+    auto& socket = m_zmq_sockets[from];
+
+    // 1. 构建JSON请求
+    // 服务器提供的是(throughputKbps, delayMs, lossRate, 码率差)
+    // 我们需要从session中获取上一次的码率来计算差值
+    double last_bitrate_kbps = session.lastAiBitrateDecisionBps / 1000.0;
+    double bitrate_diff_kbps = throughputKbps - last_bitrate_kbps;
+
+    json request_json;
+    request_json["cameraId"] = session.clientInfo.cameraId;
+    request_json["throughputKbps"] = throughputKbps;
+    request_json["delayMs"] = delay.GetMilliSeconds();
+    request_json["lossRate"] = lossRate;
+    request_json["bitrate_diff"] = bitrate_diff_kbps;
+    
+    std::string request_str = request_json.dump();
+    
+    // 2. 发送请求
+    NS_LOG_INFO("To AI -> " << request_str);
+    socket->send(zmq::buffer(request_str), zmq::send_flags::none);
+
+    // 3. 等待并接收回复
+    zmq::message_t reply;
+    auto res = socket->recv(reply, zmq::recv_flags::none);
+
+    if (res) {
+        std::string reply_str = reply.to_string();
+        NS_LOG_INFO("From AI <- " << reply_str);
+        try {
+            json reply_json = json::parse(reply_str);
+            uint32_t target_bitrate_bps = reply_json["targetBitrate"];
+            
+            // 更新会话中记录的上一次决策码率
+            session.lastAiBitrateDecisionBps = target_bitrate_bps;
+            return target_bitrate_bps;
+        } catch (const std::exception& e) {
+            NS_LOG_ERROR("AI解析错误: " << e.what() << ". 使用历史码率.");
+            // 如果解析失败，返回上一次的码率以保证稳定性
+            return session.lastAiBitrateDecisionBps;
+        }
+    } else {
+        NS_LOG_WARN("没有获得AI模型回复，使用历史码率.");
+        return session.lastAiBitrateDecisionBps;
+    }
+}
+
 
 
 }

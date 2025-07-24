@@ -24,6 +24,9 @@ set(HEADER_FILES
 # 3. 查找项目依赖的外部库
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
+# 使用 pkg-config 来查找 ZeroMQ
+pkg_check_modules(ZMQ REQUIRED libzmq)
+
 
 # 4. 使用 ns-3 的 "build_lib" 函数来定义模块库
 build_lib(
@@ -36,11 +39,18 @@ build_lib(
     ${libinternet}
     ${libapplications}
     Threads::Threads
-    ${libai} # 链接 ns3-ai 模块
+    ${ZMQ_LIBRARIES}
 )
 
 # 5. 告诉编译器去哪里寻找头文件 (.h)
-target_include_directories(${MODULE} PUBLIC
+
+target_include_directories(${MODULE}
+  PRIVATE
+    ${ZMQ_INCLUDE_DIRS}
+)
+
+target_include_directories(${MODULE}
+  PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/model>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/helper>
 )
