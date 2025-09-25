@@ -23,6 +23,8 @@
 #include <algorithm>
 #include <iomanip>
 
+#include <cmath> // 确保包含了 cmath 以使用 exp 和 log
+
 
 #include <nlohmann/json.hpp>
 // 为方便使用，创建一个别名
@@ -179,7 +181,7 @@ TypeId YtyServer::GetTypeId(void)
                       MakeUintegerAccessor(&YtyServer::m_port),
                       MakeUintegerChecker<uint16_t>())
         .AddAttribute("ReportInterval", "Interval for sending RTCP reports.",
-                      TimeValue(MilliSeconds(500)),
+                      TimeValue(MilliSeconds(50)),
                       MakeTimeAccessor(&YtyServer::m_reportInterval),
                       MakeTimeChecker())
         // 为日志记录添加新属性
@@ -194,17 +196,23 @@ TypeId YtyServer::GetTypeId(void)
         .AddAttribute("UseAI", "Enable AI-based congestion control via ZMQ.",
                       BooleanValue(false), // 默认关闭AI模式
                       MakeBooleanAccessor(&YtyServer::m_useAI),
+                      MakeBooleanChecker())
+        .AddAttribute("UseMinerva", "Enable Minerva-like QoE-based rate adjustment.",
+                      BooleanValue(false), // 默认关闭 Minerva
+                      MakeBooleanAccessor(&YtyServer::m_useMinerva),
                       MakeBooleanChecker());
     return tid;
 }
 
 
-YtyServer::YtyServer() : m_useAI(false), m_socket(0), m_port(9) 
+YtyServer::YtyServer() : m_useMinerva(false), m_useAI(false), m_socket(0), m_port(9) 
 {
     // 如果启用了AI模式，则初始化ZMQ上下文
     if (m_useAI) {
         m_zmq_context = std::make_unique<zmq::context_t>(1);
     }
+    // 在构造函数中初始化VMAF查询表
+    InitializeVmafLut();
 }
 
 YtyServer::~YtyServer() { 
@@ -219,8 +227,43 @@ void YtyServer::DoDispose(void)
     Application::DoDispose();
 }
 
+// VMAF 查询表初始化函数的具体实现
+void YtyServer::InitializeVmafLut()
+{
+    // 这个函数的内容就是将 fit_QoE.py 中的 VMAF_LUT 硬编码到 C++ 代码中
+    // H.264
+    m_vmafLut["H.264"][{854, 480}] = {{18, 72.36}, {19, 71.39}, {20, 70.38}, {21, 69.25}, {22, 67.99}, {23, 66.56}, {24, 64.99}, {25, 63.27}, {26, 61.37}, {27, 59.22}, {28, 56.81}, {29, 54.54}, {30, 51.66}, {31, 48.88}, {32, 45.69}};
+    m_vmafLut["H.264"][{1280, 720}] = {{18, 86.96}, {19, 86.15}, {20, 85.32}, {21, 84.36}, {22, 83.33}, {23, 82.09}, {24, 80.78}, {25, 79.31}, {26, 77.65}, {27, 75.87}, {28, 73.78}, {29, 71.43}, {30, 69.09}, {31, 66.30}, {32, 63.42}};
+    m_vmafLut["H.264"][{1920, 1080}] = {{18, 96.48}, {19, 95.82}, {20, 95.12}, {21, 94.31}, {22, 93.46}, {23, 92.47}, {24, 91.39}, {25, 90.20}, {26, 88.92}, {27, 87.40}, {28, 85.76}, {29, 83.81}, {30, 81.76}, {31, 79.56}, {32, 77.01}};
+    m_vmafLut["H.264"][{2560, 1440}] = {{18, 99.27}, {19, 99.05}, {20, 98.77}, {21, 98.34}, {22, 97.73}, {23, 96.97}, {24, 96.10}, {25, 95.06}, {26, 93.96}, {27, 92.68}, {28, 91.24}, {29, 89.70}, {30, 87.98}, {31, 85.98}, {32, 83.76}};
+    // H.265
+    m_vmafLut["H.265"][{854, 480}] = {{18, 72.93}, {19, 72.10}, {20, 71.18}, {21, 70.18}, {22, 69.08}, {23, 67.93}, {24, 66.53}, {25, 65.02}, {26, 63.32}, {27, 61.46}, {28, 59.46}, {29, 57.17}, {30, 54.62}, {31, 52.00}, {32, 49.16}};
+    m_vmafLut["H.265"][{1280, 720}] = {{18, 87.45}, {19, 86.76}, {20, 86.07}, {21, 85.24}, {22, 84.37}, {23, 83.42}, {24, 82.32}, {25, 81.10}, {26, 79.72}, {27, 78.25}, {28, 76.41}, {29, 74.60}, {30, 72.42}, {31, 70.03}, {32, 67.31}};
+    m_vmafLut["H.265"][{1920, 1080}] = {{18, 96.78}, {19, 96.23}, {20, 95.60}, {21, 94.92}, {22, 94.16}, {23, 93.33}, {24, 92.44}, {25, 91.46}, {26, 90.37}, {27, 89.12}, {28, 87.75}, {29, 86.20}, {30, 84.52}, {31, 82.46}, {32, 80.35}};
+    m_vmafLut["H.265"][{2560, 1440}] = {{18, 99.44}, {19, 99.27}, {20, 99.03}, {21, 98.71}, {22, 98.25}, {23, 97.66}, {24, 96.96}, {25, 96.17}, {26, 95.25}, {27, 94.23}, {28, 93.10}, {29, 91.80}, {30, 90.41}, {31, 88.80}, {32, 86.94}};
+}
 
-// VVV 新增: 实现客户端信息注册方法 VVV
+
+// VMAF 查询函数的具体实现
+double YtyServer::GetVmafForParams(const std::string& codec, int width, int height, int crf)
+{
+    auto it_codec = m_vmafLut.find(codec);
+    if (it_codec != m_vmafLut.end()) {
+        auto it_res = it_codec->second.find({width, height});
+        if (it_res != it_codec->second.end()) {
+            auto it_crf = it_res->second.find(crf);
+            if (it_crf != it_res->second.end()) {
+                return it_crf->second;
+            }
+        }
+    }
+    // 如果找不到精确匹配，可以返回一个默认值或基于插值的结果
+    // 为简单起见，我们返回一个中等质量的值
+    return 80.0;
+}
+
+
+// 实现客户端信息注册方法
 void YtyServer::RegisterClientInfo(const Ipv4Address& clientIp, const ClientInfo& info)
 {
     NS_LOG_FUNCTION(this << clientIp << info.accessType << info.region);
@@ -229,7 +272,6 @@ void YtyServer::RegisterClientInfo(const Ipv4Address& clientIp, const ClientInfo
                 << ", CamID=" << info.cameraId 
                 << ", Type=" << info.accessType
                 << ", Region=" << info.region
-                
                 << ", Codec=" << info.codec);
 }
 // ^^^ 新增 ^^^
@@ -591,6 +633,16 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
 
     // 这个函数会根据m_useAI标志自动选择GCC或AI
     uint32_t targetBitrateBps = GetTargetBitrate(session, bandwidthToReportKbps, avgDelay, lossRate);
+
+    // --- 应用 Minerva 权重 ---
+    // 如果Minerva开关打开，就用刚刚在 LogPlaybackStats 中计算出的权重来调整目标码率
+    if (m_useMinerva)
+    {
+        uint32_t originalBitrateBps = targetBitrateBps;
+        double RegularWeight = std::max(0.7, std::min(session.smoothedMinervaWeight, 1.1));
+        targetBitrateBps = static_cast<uint32_t>(originalBitrateBps * RegularWeight);
+    }
+
     session.aiBandwidth = targetBitrateBps; // 更新用于日志的aiBandwidth字段
 
     Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&targetBitrateBps), sizeof(uint32_t));
@@ -757,7 +809,62 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         avgJitterMs = (session.logIntervalSumJitter / session.logIntervalRtcpCount) * 1000.0; // 转换为毫秒
     }
 
-    // --- 【核心修正】将计算好的各项指标写入日志文件 ---
+
+    // --- 在这里计算 QoE 和 Minerva 权重 ---
+    if (m_useMinerva)
+    {
+        // 1. 分解分辨率字符串 "1920x1080"
+        int width = 0, height = 0;
+        size_t x_pos = session.resolution.find('x');
+        if (x_pos != std::string::npos) {
+            try {
+                width = std::stoi(session.resolution.substr(0, x_pos));
+                height = std::stoi(session.resolution.substr(x_pos + 1));
+            } catch (const std::exception& e) {
+                // 解析失败则使用默认值
+                width = 1280; height = 720;
+            }
+        }
+
+        // 2. 查询当前 VMAF
+        double currentVMAF = GetVmafForParams(session.clientInfo.codec, width, height, session.crf);
+
+        // 3. 计算 VMAF 抖动
+        double vmafJitter = currentVMAF - session.lastVMAF;
+
+        // 4. 计算 QoE
+        // QoE = VMAF - 25 * StutterRate - 2.5 * abs(VMAF_Jitter)
+        session.qoeValue = currentVMAF - 25.0 * stutterRate - 2.5 * std::abs(vmafJitter);
+
+        // 5. 计算 f(QoE) 参考码率 (kbps)
+        // Bitrate = exp((QoE + 5.7438) / 11.1747)
+        double referenceBitrateKbps = std::exp((session.qoeValue + 5.7438) / 11.1747);
+        
+        // 6. 计算权重 w
+        double actualBitrateKbps = session.actualBitrate / 1000.0;
+        if (referenceBitrateKbps > 1.0) // 防止除以零
+        {
+            session.minervaWeight = actualBitrateKbps / referenceBitrateKbps;
+        }
+        else
+        {
+            session.minervaWeight = 1.0; // 异常情况，不调整
+        }
+
+        // 使用 EWMA 平滑权重
+        // Minerva 论文中建议的平滑因子是 0.1 (新值占10%，旧值占90%)
+        // w_smooth = 0.1 * w_current + 0.9 * w_smooth_old
+        const double alpha = 0.1;
+        session.smoothedMinervaWeight = alpha * session.minervaWeight + (1.0 - alpha) * session.smoothedMinervaWeight;
+
+
+        // 7. 更新上一次的 VMAF 值，为下个周期做准备
+        session.lastVMAF = currentVMAF;
+
+    }
+
+    
+    // 将计算好的各项指标写入日志文件
     if (m_logFile.is_open())
     {
         m_logFile << Simulator::Now().GetSeconds() << "\t"

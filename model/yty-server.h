@@ -80,6 +80,9 @@ public:
     YtyServer();
     virtual ~YtyServer();
 
+    //Minerva VMAF 查询函数,根据摄像头上报的分辨率和CRF，查询其对应的VMAF值
+    double GetVmafForParams(const std::string& codec, int width, int height, int crf);
+
     /**
      * @brief 存储一个客户端网络接口的所有相关信息
      */
@@ -105,6 +108,9 @@ protected:
     virtual void DoDispose(void);
 
 private:
+
+    // Minerva 开关
+    bool m_useMinerva; // Minerva 机制的开关
 
     // zmq通信
     bool m_useAI; // AI模式的开关
@@ -195,7 +201,11 @@ private:
         uint64_t discardedBytesDueToStutter; // 因卡顿（过时）而丢弃的总字节数
         uint32_t skippedFramesDueToStutter;  // 因卡顿（过时）而跳过的帧数
 
-
+        // Minerva 相关状态变量
+        double   lastVMAF;              // 上一个周期的VMAF值，用于计算VMAF_Jitter
+        double   qoeValue;              // 当前计算出的QoE值
+        double   minervaWeight;         // 当前计算出的Minerva权重 w
+        double   smoothedMinervaWeight;
 
         // 构造函数
         ClientSession() :
@@ -246,7 +256,13 @@ private:
             gccController(std::make_unique<GCCController>()),
 
             discardedBytesDueToStutter(0),
-            skippedFramesDueToStutter(0)
+            skippedFramesDueToStutter(0),
+
+            // 初始化 Minerva 相关变量
+            lastVMAF(80.0), // 给予一个合理的初始值，避免第一次计算抖动过大
+            qoeValue(0.0),
+            minervaWeight(1.0), // 权重默认为1，即不产生影响
+            smoothedMinervaWeight(1.0) // <<< 【新增】平滑权重的初始值也设为1.0
             
         {
         }
@@ -289,6 +305,10 @@ private:
     
     // 一个专门用于和Python AI通信的函数
     uint32_t GetBitrateFromAI(ClientSession& session, double throughputKbps, Time delay, double lossRate, const Address& from);
+
+    // VMAF查询表的私有成员, 使用嵌套 map 来存储 VMAF LUT
+    std::map<std::string, std::map<std::pair<int, int>, std::map<int, double>>> m_vmafLut;
+    void InitializeVmafLut(); // 用于初始化VMAF查询表的函数
     
 };
 
