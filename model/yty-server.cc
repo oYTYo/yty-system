@@ -113,14 +113,14 @@ std::string GCCController::delay_based_control(double delay_ms, long long curren
 }
 
 // get_target_bitrate_kbps 接口适配 ns-3 参数
-double GCCController::get_target_bitrate_kbps(double throughputKbps, double delayMs, double lossRate, double rttMs, long long currentTimeMs) {
+double GCCController::get_target_bitrate_kbps(double throughputKbps, double delayMs, double lossRate, double rttMs, long long currentTimeMs, double minervaWeight) {
     // 移除原始 gcc_server.cpp 中的 JSON 解析部分，直接使用传入的参数
     last_acked_bitrate_bps_ = throughputKbps * BPS_IN_KBPS;
     
     std::string loss_decision = loss_based_control(lossRate);
     std::string delay_decision = delay_based_control(delayMs, currentTimeMs);
     
-    update_bitrate(loss_decision, delay_decision, rttMs, currentTimeMs);
+    update_bitrate(loss_decision, delay_decision, rttMs, currentTimeMs, minervaWeight);
     
     current_bitrate_bps_ = std::max(current_bitrate_bps_, MIN_BITRATE_KBPS * BPS_IN_KBPS);
     current_bitrate_bps_ = std::min(current_bitrate_bps_, MAX_BITRATE_MBPS * 1e6); // 1e6 是 MBPS 到 BPS
@@ -137,11 +137,18 @@ std::string GCCController::get_state_string() const {
     }
 }
 
-void GCCController::update_bitrate(const std::string& loss_decision, const std::string& delay_decision, double rtt_ms, long long current_time_ms) {
+void GCCController::update_bitrate(const std::string& loss_decision, const std::string& delay_decision, double rtt_ms, long long current_time_ms, double minervaWeight) {
+
+    // 为了防止权重过大或过小导致算法不稳定，我们将其限制在一个合理的范围内，例如 [0.5, 2.0]，与Minerva论文一致
+    double clampedWeight = std::max(0.5, std::min(minervaWeight, 2.0));
+
     if (loss_decision == "decrease" || delay_decision == "decrease") {
+
+        double decreaseFactor = 1.0 - ((1.0 - 0.85) / clampedWeight);  // 一个动态衰减因子，当w等于1的时候不改变衰减幅度，w大于1衰减变少，w小于1衰减变多。Minerva只修改了乘性减的幅度
+
         current_bitrate_bps_ = std::min(
             current_bitrate_bps_,
-            std::max(last_acked_bitrate_bps_ * 0.85, MIN_BITRATE_KBPS * BPS_IN_KBPS)
+            std::max(last_acked_bitrate_bps_ * decreaseFactor, MIN_BITRATE_KBPS * BPS_IN_KBPS)
         );
         time_of_last_bitrate_increase_ms_ = -1;
         return;
@@ -160,10 +167,13 @@ void GCCController::update_bitrate(const std::string& loss_decision, const std::
             double additive_increase_bps = std::max(50000.0, alpha * (AVERAGE_PACKET_SIZE_BYTES * 8000.0) / response_time_ms);
             
             current_bitrate_bps_ += additive_increase_bps;
+            // current_bitrate_bps_ += (additive_increase_bps * clampedWeight);  // 可选项：修改加性增的幅度
 
         } else { // state_ == NetworkState::Underuse
             // 还原为 gcc_server.cpp 中的值：1.15
             current_bitrate_bps_ *= 1.15;
+            // double increaseFactor = 1.0 + ((1.15 - 1.0) * clampedWeight);  // 可选项：修改乘性增的速度
+            // current_bitrate_bps_ *= increaseFactor;
         }
     }
     last_update_ms_ = current_time_ms;
@@ -302,7 +312,7 @@ void YtyServer::StartApplication(void)
     m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
     if (m_logFile.is_open())
     {
-        m_logFile << "Time(s)\tClientAddr\tCameraId\tThroughput(kbps)\tAvgDelay(ms)\tAvgLossRate\tAvgJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tSkippedFrames\tDiscardedBytes(kb)\tAccessType\tRegion\tCodec\tAIBandwidth(kbps)\tResolution\tCRF\tActualBitrate(kbps)" << std::endl;
+        m_logFile << "Time(s)\tClientAddr\tCameraId\tThroughput(kbps)\tAvgDelay(ms)\tAvgLossRate\tAvgJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tAccessType\tRegion\tCodec\tAvgAIBandwidth(kbps)\tAvgActualBitrate(kbps)\tAvgVMAF" << std::endl;
     }
 }
     
@@ -368,26 +378,33 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
             }
             else
             {
-                // 魔数不匹配，这必定是一个文本控制包。
-                // 按原样处理文本消息。
-                uint8_t buffer[256];
-                packet->CopyData(buffer, std::min((uint32_t)255, packet->GetSize()));
-                buffer[std::min((uint32_t)255, packet->GetSize())] = '\0'; // 确保字符串正确终止
-                std::string request(reinterpret_cast<char*>(buffer));
+                // 这是一个更健壮和带有诊断功能的文本消息处理逻辑块
 
-                // 现在，我们可以安全地根据字符串内容进行分发。
+                // 从数据包中安全地读取数据到缓冲区
+                uint32_t packetSize = packet->GetSize();
+                // 我们创建一个大小正好的char数组，而不是固定的256字节
+                std::vector<char> buffer(packetSize + 1, '\0'); 
+                packet->CopyData(reinterpret_cast<uint8_t*>(buffer.data()), packetSize);
+                
+                // 从缓冲区创建字符串
+                std::string request(buffer.data(), packetSize);
+
+                // 根据明确的字符串前缀进行判断和处理
                 if (request.rfind("PLAY", 0) == 0 || request.rfind("TEARDOWN", 0) == 0)
                 {
                     ProcessRtsp(packet, from);
                 }
-
                 else if (request.rfind("SET_PARAMS", 0) == 0)
                 {
-                    // 处理来自摄像头的参数更新
                     if (m_sessions.count(from)) {
                         ClientSession& session = m_sessions[from];
                         std::istringstream requestStream(request);
                         std::string line;
+                        
+                        std::string new_resolution = session.resolution;
+                        uint32_t new_crf = session.crf;
+                        uint32_t new_actual_bitrate = session.actualBitrate;
+
                         while (std::getline(requestStream, line))
                         {
                             if (!line.empty() && line.back() == '\r') {
@@ -398,20 +415,43 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
                             std::string header_br = "X-Actual-Bitrate: ";
 
                             if (line.rfind(header_res, 0) == 0) {
-                                session.resolution = line.substr(header_res.length());
+                                new_resolution = line.substr(header_res.length());
                             }
                             else if (line.rfind(header_crf, 0) == 0) {
-                                session.crf = std::stoul(line.substr(header_crf.length()));
+                                new_crf = std::stoul(line.substr(header_crf.length()));
                             }
                             else if (line.rfind(header_br, 0) == 0) {
-                                session.actualBitrate = std::stoul(line.substr(header_br.length()));
+                                new_actual_bitrate = std::stoul(line.substr(header_br.length()));
                             }
                         }
+
+                        session.resolution = new_resolution;
+                        session.crf = new_crf;
+                        session.actualBitrate = new_actual_bitrate;
+
+                        session.logIntervalSumActualBitrateBps += session.actualBitrate;
+
+                        int width = 0, height = 0;
+                        size_t x_pos = session.resolution.find('x');
+                        if (x_pos != std::string::npos) {
+                            try {
+                                width = std::stoi(session.resolution.substr(0, x_pos));
+                                height = std::stoi(session.resolution.substr(x_pos + 1));
+                            } catch (const std::exception& e) {
+                                width = 0; height = 0;
+                            }
+                        }
+                        if (width > 0 && height > 0) {
+                            double currentVMAF = GetVmafForParams(session.clientInfo.codec, width, height, session.crf);
+                            session.logIntervalSumVmaf += currentVMAF;
+                        }
+
+                        session.logIntervalParamUpdateCount++;
                     }
                 }
                 else
                 {
-                     NS_LOG_WARN("收到一个未知类型的控制包，来自 " << InetSocketAddress::ConvertFrom(from).GetIpv4() << ", 内容: " << request);
+                    NS_LOG_WARN("The received text packet did not match any known commands (PLAY, TEARDOWN, SET_PARAMS).");
                 }
             }
         }
@@ -443,8 +483,6 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
     uint32_t frameSeq = rtpHeader.GetFrameSeq();
     if (frameSeq < session.nextFrameToPlay)
     {
-        // NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Server discarded an old packet for frame " << frameSeq << " (expecting frame " << session.nextFrameToPlay << ").");
-        session.discardedBytesDueToStutter += packet->GetSize(); // 累加过时丢弃的字节
         return; // 丢弃过时的包，函数直接返回
     }
 
@@ -634,16 +672,9 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     // 这个函数会根据m_useAI标志自动选择GCC或AI
     uint32_t targetBitrateBps = GetTargetBitrate(session, bandwidthToReportKbps, avgDelay, lossRate);
 
-    // --- 应用 Minerva 权重 ---
-    // 如果Minerva开关打开，就用刚刚在 LogPlaybackStats 中计算出的权重来调整目标码率
-    if (m_useMinerva)
-    {
-        uint32_t originalBitrateBps = targetBitrateBps;
-        double RegularWeight = std::max(0.7, std::min(session.smoothedMinervaWeight, 1.1));
-        targetBitrateBps = static_cast<uint32_t>(originalBitrateBps * RegularWeight);
-    }
-
     session.aiBandwidth = targetBitrateBps; // 更新用于日志的aiBandwidth字段
+    
+    session.logIntervalSumAiBandwidthBps += targetBitrateBps; // 在这里累加服务器计算出的建议带宽
 
     Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&targetBitrateBps), sizeof(uint32_t));
     m_socket->SendTo(rtcpPacket, 0, clientAddress);
@@ -746,17 +777,12 @@ void YtyServer::HandleStutter(const Address& clientAddress)
     uint32_t frameToClean = session.nextFrameToPlay;
     if (session.buffer.count(frameToClean))
     {   
-        // 累加被丢弃帧的字节数
-        for (const auto& pair : session.buffer[frameToClean]) {
-            session.discardedBytesDueToStutter += pair.second.packet->GetSize();
-        }
         // 从 map 中删除这个永远不会被播放的帧的所有相关数据。
         session.buffer.erase(frameToClean);
         NS_LOG_INFO("从缓冲区中删掉帧 " << frameToClean << " 避免持续累积.");
     }
 
     session.stutterEvents++;
-    session.skippedFramesDueToStutter++; // 统计跳过的帧数
     session.nextFrameToPlay++; // 跳过迟到的帧
 
     // 跳过之后，立即尝试播放下一帧。
@@ -809,7 +835,22 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         avgJitterMs = (session.logIntervalSumJitter / session.logIntervalRtcpCount) * 1000.0; // 转换为毫秒
     }
 
+    // 计算可用带宽、实际码率和VMAF的平均值
+    double avgAiBandwidthKbps = 0.0;
+    if (session.logIntervalRtcpCount > 0) {
+        // 用累加的总带宽(bps)除以RTCP反馈次数，再换算成kbps
+        avgAiBandwidthKbps = (session.logIntervalSumAiBandwidthBps / session.logIntervalRtcpCount) / 1000.0;
+    }
 
+    double avgActualBitrateKbps = 0.0;
+    double avgVmaf = 0.0;
+    if (session.logIntervalParamUpdateCount > 0) {
+        // 用累加的实际码率(bps)除以参数更新次数，再换算成kbps
+        avgActualBitrateKbps = (session.logIntervalSumActualBitrateBps / session.logIntervalParamUpdateCount) / 1000.0;
+        // 用累加的VMAF分数除以参数更新次数
+        avgVmaf = session.logIntervalSumVmaf / session.logIntervalParamUpdateCount;
+    }
+    
     // --- 在这里计算 QoE 和 Minerva 权重 ---
     if (m_useMinerva)
     {
@@ -837,8 +878,8 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         session.qoeValue = currentVMAF - 25.0 * stutterRate - 2.5 * std::abs(vmafJitter);
 
         // 5. 计算 f(QoE) 参考码率 (kbps)
-        // Bitrate = exp((QoE + 5.7438) / 11.1747)
-        double referenceBitrateKbps = std::exp((session.qoeValue + 5.7438) / 11.1747);
+        // 第一轮公式
+        double referenceBitrateKbps = std::exp((session.qoeValue + 55.8085) / 18.2327);
         
         // 6. 计算权重 w
         double actualBitrateKbps = session.actualBitrate / 1000.0;
@@ -868,28 +909,24 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     if (m_logFile.is_open())
     {
         m_logFile << Simulator::Now().GetSeconds() << "\t"
-                  << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << "\t" // ClientAddr
-                  << session.clientInfo.cameraId << "\t"  // CameraId
-                  << throughputKbps << "\t"             // Throughput(kbps) - 直接使用已是Kbps单位的变量，无需再除1000
-                  << avgDelayMs << "\t"                 // AvgDelay(ms)
-                  << avgLossRate << "\t"                // AvgLossRate
-                  << avgJitterMs << "\t"                // AvgJitter(ms)
-                  << session.playedFrames << "\t"       // PlayedFrames
-                  << session.stutterEvents << "\t"      // StutterEvents
-                  << stutterRate << "\t"                 // StutterRate
-                  << session.skippedFramesDueToStutter << "\t" // 跳过的帧数
-                  << session.discardedBytesDueToStutter / 1000 << "\t" // 因卡顿丢弃的字节数 (kb)
-                 
-                  << session.clientInfo.accessType << "\t"// AccessType
-                  << session.clientInfo.region << "\t"    // Region
-                  << session.clientInfo.codec << "\t"     // Codec
-                  << session.aiBandwidth / 1000 << "\t"   // AIBandwidth(kbps)
-                  << session.resolution << "\t"           // Resolution
-                  << session.crf << "\t"                  // CRF
-                  << session.actualBitrate / 1000 << '\n'; // ActualBitrate(kbps)
+                  << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << "\t"
+                  << session.clientInfo.cameraId << "\t"
+                  << throughputKbps << "\t"
+                  << avgDelayMs << "\t"
+                  << avgLossRate << "\t"
+                  << avgJitterMs << "\t"
+                  << session.playedFrames << "\t"
+                  << session.stutterEvents << "\t"
+                  << stutterRate << "\t"
+                  << session.clientInfo.accessType << "\t"
+                  << session.clientInfo.region << "\t"
+                  << session.clientInfo.codec << "\t"
+                  << avgAiBandwidthKbps << "\t"   // 使用计算出的平均值
+                  << avgActualBitrateKbps << "\t" // 使用计算出的平均值
+                  << avgVmaf << '\n';            // 使用计算出的平均VMAF
     }
     
-    // --- 为下一个日志周期重置所有相关的统计量 ---
+    // 为下一个日志周期重置所有相关的统计量
     session.playedFrames = 0;
     session.stutterEvents = 0;
     session.logIntervalSumDelay = Seconds(0);
@@ -898,8 +935,12 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     session.logIntervalRtcpCount = 0;
     session.logIntervalReceivedBytes = 0;
     session.logIntervalStartTime = Simulator::Now();
-    session.skippedFramesDueToStutter = 0;
-    session.discardedBytesDueToStutter = 0;
+    
+    // 重置新增的累加器
+    session.logIntervalSumAiBandwidthBps = 0.0;
+    session.logIntervalSumActualBitrateBps = 0.0;
+    session.logIntervalSumVmaf = 0.0;
+    session.logIntervalParamUpdateCount = 0;
 
     // 安排下一次日志事件
     ScheduleLog(clientAddress);
@@ -927,12 +968,17 @@ uint32_t YtyServer::GetTargetBitrate(ClientSession& session, double throughputKb
     else
     {
         long long current_time_ms = Simulator::Now().GetMilliSeconds();
+
+        // 我们使用 smoothedMinervaWeight 以获得更稳定的表现
+        double weight = session.smoothedMinervaWeight;
+
         double target_kbps = session.gccController->get_target_bitrate_kbps(
                                     throughputKbps,
                                     delay.GetMilliSeconds(),
                                     lossRate,
                                     delay.GetMilliSeconds(), // RTT用延迟近似
-                                    current_time_ms
+                                    current_time_ms,
+                                    weight  // 将权重传递给GCC控制器
                                 );
         session.lastAiBitrateDecisionBps = static_cast<uint32_t>(target_kbps * 1000.0);
         return session.lastAiBitrateDecisionBps;

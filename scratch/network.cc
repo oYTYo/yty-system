@@ -724,4 +724,5 @@ int main(int argc, char* argv[])
 
     return 0;
 }
-// 测试
+// eval "$(ssh-agent -s)"
+// ssh-add ~/.ssh/github
