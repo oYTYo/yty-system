@@ -68,7 +68,7 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
     }
 
     // 从向量中获取当前的带宽值
-    double new_kbps = bandwidths_kbps[index] * 60 * 1000 * 3.5 / 1.5;  // 基础是3.5
+    double new_kbps = bandwidths_kbps[index] * 60 * 1000 * 10.0 / 3.5;  // 摄像机总数是60，基础是3.5
     // 构造成ns3的DataRate对象
     DataRate newRate(std::to_string(new_kbps) + "Kbps");
 
@@ -88,7 +88,7 @@ int main(int argc, char* argv[])
 
     // --- AI模式开关 ---
     bool useAI = false;
-    bool useMinerva = true; // Minerva 开关
+    bool useMinerva = false; // Minerva 开关
     CommandLine cmd;
     // 添加一个命令行参数 --useAI，可以接受 true 或 false
     cmd.AddValue("useAI", "Enable AI-based congestion control", useAI);
@@ -113,13 +113,13 @@ int main(int argc, char* argv[])
     const uint32_t LTE_ENB_PER_REGION        = LTE_CAM_PER_REGION / 10;
     const uint32_t LTE_UE_PER_ENB            = LTE_CAM_PER_REGION / LTE_ENB_PER_REGION;
 
-    const double   simulationTime            = 1800.0; // 仿真总时长（秒）
+    const double   simulationTime            = 660.0; // 仿真总时长（秒）
     const uint16_t serverPort                = 9;    // 服务器应用监听端口
 
     // ===================================================================================
     // --- 新增: 动态带宽计算 ---
     // ===================================================================================
-    const double   avgBitratePerCamMbps      = 1.5;  // 假设每个摄像头的平均码率为 5 Mbps
+    const double   avgBitratePerCamMbps      = 10.0;  // 假设每个摄像头的平均码率
     const double   bandwidthMargin           = 1;  // 20%的带宽余量以应对突发流量
 
     // 有线摄像头到接入交换机网络带宽 (有线摄像头 -> 交换机) 弃用csma了
@@ -724,5 +724,3 @@ int main(int argc, char* argv[])
 
     return 0;
 }
-// eval "$(ssh-agent -s)"
-// ssh-add ~/.ssh/github
