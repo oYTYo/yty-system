@@ -6,7 +6,7 @@
  * 拓扑结构被简化为二级星型拓扑: "摄像头 - 交换机 - 服务器"。
  *
  * 主要特点:
- * 1. 拓扑: 9个有线摄像头 -> 1个中心交换机 -> 1个服务器。
+ * 1. 拓扑: 12个有线摄像头 -> 1个中心交换机 -> 1个服务器。
  * 2. 摄像头配置: 包含6个H.264编码的摄像头和3个H.265编码的摄像头。
  * 3. 动态带宽: 交换机到服务器之间的骨干链路带宽会根据 'scratch/bandwidth.txt' 文件中的配置动态变化，模拟网络波动。
  * 4. 功能保留: 保留了原有的 YtyCamera 和 YtyServer 应用逻辑，以及通过命令行开启 AI 或 Minerva 拥塞控制算法的选项。
@@ -72,8 +72,8 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
         index = 0;
     }
 
-    // [修改] 带宽计算因子调整，原先是为60个摄像头设计的，现在调整为9个
-    double new_kbps = bandwidths_kbps[index] * 9 * 1000 * 10.0 / 3.5;
+    // [修改] 带宽计算因子调整，原先是为60个摄像头设计的，现在调整为12个
+    double new_kbps = bandwidths_kbps[index] * 12 * 1000 * 2.0 / 3.5;
     DataRate newRate(std::to_string(new_kbps) + "Kbps");
 
     ChangeBandwidth(devices, newRate);
@@ -94,7 +94,7 @@ int main(int argc, char* argv[])
     cmd.Parse(argc, argv);
 
     // --- 仿真核心参数 ---
-    const uint32_t WIRED_CAM_TOTAL = 9; // [修改] 简化为9个有线摄像头
+    const uint32_t WIRED_CAM_TOTAL = 12; // [修改] 简化为12个有线摄像头
     const double   simulationTime  = 660.0;
     const uint16_t serverPort      = 9;
 
@@ -157,7 +157,7 @@ int main(int argc, char* argv[])
         ipv4h.SetBase(ipBase.c_str(), "255.255.255.252");
         Ipv4InterfaceContainer camToSwitchIfaces = ipv4h.Assign(camToSwitchDevs);
 
-        Ipv4Address camIp = camToSwitchIfaces.GetAddress(0);
+        // Ipv4Address camIp = camToSwitchIfaces.GetAddress(0);
         Ipv4Address switchIp_onCamLink = camToSwitchIfaces.GetAddress(1);
 
         // 在摄像头上设置默认路由，指向交换机
@@ -173,7 +173,7 @@ int main(int argc, char* argv[])
     // (4.1) 服务器应用
     LogComponentEnable("YtyServerApplication", LOG_LEVEL_INFO);
     YtyServerHelper serverHelper(serverPort);
-    serverHelper.SetAttribute("LogFile", StringValue("scratch/play_status_simple.txt"));
+    serverHelper.SetAttribute("LogFile", StringValue("scratch/play_status_large_scale.txt"));
     serverHelper.SetAttribute("UseAI", BooleanValue(useAI));
     serverHelper.SetAttribute("UseMinerva", BooleanValue(useMinerva));
 
@@ -192,12 +192,17 @@ int main(int argc, char* argv[])
     {
         Ptr<Node> camNode = cameraNodes.Get(i);
         
-        // --- [核心修改] 固定分配6个H.264和3个H.265摄像头 ---
+        // ---  固定分配H.264,H.265,VP9摄像头 ---
         std::string codec_type;
-        if (i < 6) {
+
+        if (i % 4 == 0) {
             codec_type = "H.264";
-        } else {
+        } else if (i % 4 == 1) {
             codec_type = "H.265";
+        } else if (i % 4 == 2) {
+            codec_type = "VP9";
+        } else {
+            codec_type = "AV1";
         }
         
         cameraHelper.SetAttribute("CameraId", UintegerValue(cameraIdCounter));
