@@ -113,7 +113,6 @@ private:
     EventId m_encoderEvent;
     bool m_running;
 
-
     std::queue<Ptr<Packet>> m_sendBuffer;
 
     uint32_t m_frameSeqCounter;
@@ -125,6 +124,10 @@ private:
     void SendPlayRequestAndScheduleRetry();
     bool m_sessionActive;      // 标记会话是否已激活
     EventId m_rtspRetryEvent;  // 用于RTSP PLAY重试的事件
+
+    // Pacing 机制相关的成员变量
+    EventId m_pacingEvent;         // 用于调度包间隔发送的事件ID
+    Time    m_pacingInterval;      // 包与包之间的发送间隔
 
     // 核心参数变量
     std::unique_ptr<YtyCodecSimulator> m_codecSimulator; // 编码器模拟器实例

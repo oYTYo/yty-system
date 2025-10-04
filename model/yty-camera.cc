@@ -79,6 +79,10 @@ YtyCamera::YtyCamera()
       m_cameraId(0),
       m_sessionActive(false), // 初始化会话状态为未激活
 
+      // 初始化 Pacing 相关的 EventId 和 Time
+      m_pacingEvent(),               // 初始化 EventId
+      m_pacingInterval(Seconds(0)),  // 初始化 Pacing 间隔
+
       // 将压力系统相关的常量和变量初始化
       m_increaseResPressure(0),
       m_decreaseResPressure(0),
@@ -89,7 +93,7 @@ YtyCamera::YtyCamera()
 {
     NS_LOG_FUNCTION(this);
     // 在构造函数中创建 CodecSimulator 实例
-    m_codecSimulator = std::make_unique<YtyCodecSimulator>(m_codec);
+    // m_codecSimulator = std::make_unique<YtyCodecSimulator>(m_codec);
 }
 
 YtyCamera::~YtyCamera()
@@ -159,6 +163,10 @@ void YtyCamera::StopApplication(void)
     {
         Simulator::Cancel(m_encoderEvent);
     }
+    if (m_pacingEvent.IsPending())
+    {
+        Simulator::Cancel(m_pacingEvent);
+    }
     if (m_socket)
     {
         m_socket->Close();
@@ -217,19 +225,34 @@ void YtyCamera::Encoder(void)
 }
 
 
-// 它不再是调度单个包，而是循环发送，直到缓冲区为空。
+// 它现在实现 Pacing 机制，按照 m_pacingInterval 的时间间隔发送包
 void YtyCamera::ScheduleTx(void)
 {
-    if (m_running && !m_sendBuffer.empty())
+    // 如果仿真停止或发送缓冲区为空，则返回
+    if (!m_running || m_sendBuffer.empty())
     {
-        // 从缓冲区取出一个包并发送
-        Ptr<Packet> packet = m_sendBuffer.front();
-        m_sendBuffer.pop();
-        m_socket->Send(packet);
-
-        // 只要缓冲区不为空，就立即安排下一次发送（在仿真时间上是“立刻”）
-        Simulator::ScheduleNow(&YtyCamera::ScheduleTx, this);
+        m_pacingEvent.Cancel(); // 确保事件被取消
+        return;
     }
+
+    // 从缓冲区取出一个包并发送
+    Ptr<Packet> packet = m_sendBuffer.front();
+    m_sendBuffer.pop();
+    m_socket->Send(packet);
+
+    NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() << "s, Camera " << m_cameraId << " sent packet, remaining: " << m_sendBuffer.size());
+
+
+    // 如果缓冲区还有数据包，则安排下一次发送
+    if (!m_sendBuffer.empty())
+    {
+        // **核心 Pacing 逻辑**: 按照计算出的间隔时间安排下一次发送。
+        // 如果 m_pacingInterval 为零 (例如 m_actualBitrate=0)，则使用 ScheduleNow (即时发送)。
+        Time nextSendDelay = (m_pacingInterval.IsZero()) ? Seconds(0) : m_pacingInterval;
+        
+        m_pacingEvent = Simulator::Schedule(nextSendDelay, &YtyCamera::ScheduleTx, this);
+    }
+    // 如果缓冲区为空，则等待下一个 Encoder 事件填充
 }
 
 
@@ -337,6 +360,24 @@ void YtyCamera::UpdateEncodingParameters(uint32_t bandwidthBps)
         m_frameRate = final_params.frame_rate;
         m_crf = final_params.crf;
         m_actualBitrate = final_params.actual_bitrate_kbps * 1000; // 转换回 bps
+
+        //Pacing 间隔计算：将一帧的总时间均匀分摊给每个数据包
+        // 如果码率或帧率不为零，则计算每帧平均的包间隔时间
+        if (m_actualBitrate > 0 && m_frameRate > 0)
+        {
+            // 1. 根据当前码率和帧率，计算一帧的字节数和包数
+            uint32_t frameSizeBytes = m_actualBitrate / (8 * m_frameRate);
+            uint32_t numPacketsInFrame = (frameSizeBytes + m_packetSize - 1) / m_packetSize;
+            
+            // 2. 计算 Pacing 间隔: (每帧时间) / (每帧包数)
+            // 这样，一帧的所有包会在 1/FrameRate 秒内发送完毕
+            m_pacingInterval = Seconds((1.0 / m_frameRate) / (double)numPacketsInFrame);
+        }
+        else
+        {
+            m_pacingInterval = Seconds(0); // 码率为零时不发送
+        }
+        // pacing结束
 
         // 只要有任何参数变化，就通过 SET_PARAMS 通知服务器记录日志。
         // 【重要】不再发送 PLAY 请求进行重协商。

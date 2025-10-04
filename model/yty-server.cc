@@ -451,6 +451,7 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
                         if (width > 0 && height > 0) {
                             double currentVMAF = GetVmafForParams(session.clientInfo.codec, width, height, session.crf);
                             session.logIntervalSumVmaf += currentVMAF;
+                            session.lastVMAF = currentVMAF;
                         }
 
                         session.logIntervalParamUpdateCount++;
@@ -856,6 +857,13 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         avgActualBitrateKbps = (session.logIntervalSumActualBitrateBps / session.logIntervalParamUpdateCount) / 1000.0;
         // 用累加的VMAF分数除以参数更新次数
         avgVmaf = session.logIntervalSumVmaf / session.logIntervalParamUpdateCount;
+    }
+    // 处理 logIntervalParamUpdateCount 为 0 的情况 +++
+    else 
+    {
+        // 如果在本周期内没有收到 SET_PARAMS 更新 (即 logIntervalParamUpdateCount == 0)，
+        // 则使用上一个周期计算或更新的 VMAF 值 (lastVMAF) 作为本周期的平均值。
+        avgVmaf = session.lastVMAF;
     }
     
     // --- 在这里计算 QoE 和 Minerva 权重 ---
