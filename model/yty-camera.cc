@@ -312,6 +312,15 @@ void YtyCamera::UpdateEncodingParameters(uint32_t bandwidthBps)
     // 先在当前分辨率下探测一下，如果按当前带宽，CRF会是多少
     EncodingParams probe_params = m_codecSimulator->FindBestParams(target_kbps, m_resolution, m_frameRate, 0);
 
+
+    // // --- 打印探测结果和当前状态 ---
+    // NS_LOG_UNCOND("CameraID[" << m_cameraId << "] Probe Result: found=" << probe_params.found
+    //                 << ", res=" << probe_params.resolution << ", crf=" << probe_params.crf
+    //                 << ", quality=" << probe_params.qualityLevel
+    //                 << " | Current State: incPressure=" << m_increaseResPressure
+    //                 << ", decPressure=" << m_decreaseResPressure);
+
+
     if (probe_params.found) {
         switch(probe_params.qualityLevel) {
             case CRF_QUALITY_TOO_HIGH:
