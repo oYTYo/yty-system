@@ -38,7 +38,7 @@ NS_OBJECT_ENSURE_REGISTERED(YtyServer);
 
 // 码率的绝对上限和下限，防止码率无限增长或低到无意义
 const double MAX_BITRATE_MBPS = 25.0; // 码率最高不超过 10 Mbps
-const double MIN_BITRATE_KBPS = 200.0; // 码率最低不低于 200 Kbps
+const double MIN_BITRATE_KBPS = 100.0; // 码率最低不低于 100 Kbps
 
 // 单位换算常量
 const double BPS_IN_KBPS = 1000.0; // 1 Kbps = 1000 bps
@@ -664,20 +664,7 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     uint32_t intervalSent = session.maxSeenSentPackets - session.lastReportedSentPackets;
 
     double lossRate = 0.0;
-
-    // ===================================================================================
-    // 这是解决“零吞吐量”问题的关键。
-    // 如果一个会话已经开始（hasReceivedAPacket 为 true），但在当前统计周期内没有收到任何包
-    // (intervalReceivedPackets == 0)，这不能被解释为“网络良好”。
-    // 这恰恰是网络极度拥塞、所有数据包都丢失的明确信号。
-    // 因此，我们必须在这种情况下将丢包率强制设置为 1.0 (100%)。
-    // 这样，GCC算法的丢包模块就会正确地触发码率降低机制，从而帮助网络恢复。
-    if (session.hasReceivedAPacket && session.intervalReceivedPackets == 0)
-    {
-        lossRate = 1.0; // 强制设定丢包率为 100%
-    }
-    // 只有在收到包的情况下，才执行原有的丢包率计算逻辑。
-    else if (intervalSent > 0)
+    if (intervalSent > 0)
     {
         // intervalReceivedPackets 是这个周期内实际收到的总包数。
         // 这个值是通过在 ProcessRtp 中对每个到达的包计数得来的，是绝对准确的。
