@@ -73,7 +73,7 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
     }
 
     // [修改] 带宽计算因子调整，原先是为60个摄像头设计的，现在调整为12个
-    double new_kbps = bandwidths_kbps[index] * 12 * 1000 * 0.2 / 3.5;
+    double new_kbps = bandwidths_kbps[index] * 12 * 1000 * 2.0 / 3.5;
     DataRate newRate(std::to_string(new_kbps) + "Kbps");
 
     ChangeBandwidth(devices, newRate);
