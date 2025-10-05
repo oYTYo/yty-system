@@ -142,58 +142,52 @@ int YtyCodecSimulator::GetFrameRateIndex(int fps) {
     return -1; // Not found
 }
 
-// 替换旧的 FindBestParams 函数
-EncodingParams YtyCodecSimulator::FindBestParams(double target_bitrate_kbps, 
-                                                 const std::string& current_res, 
+// 请将 FindBestParams 函数的整个函数体替换为以下代码
+EncodingParams YtyCodecSimulator::FindBestParams(double target_bitrate_kbps,
+                                                 const std::string& current_res,
                                                  int current_fps,
                                                  int switch_res_direction)
 {
     EncodingParams best_params;
     best_params.found = false;
 
-    // 1. 确定要搜索的初始分辨率
+    // 1. 确定要搜索的目标分辨率 (此部分逻辑与原来保持一致)
     int target_res_idx = GetResolutionIndex(current_res);
     if (target_res_idx == -1) { // 如果当前分辨率无效(比如是初始状态"N/A")，就从最低的开始
         target_res_idx = 0;
     }
     
-    // 根据外部压力信号，尝试提升分辨率
+    // 根据外部压力信号，尝试提升/降低目标分辨率
     if (switch_res_direction == 1) { 
         target_res_idx = std::min((int)m_resolutions.size() - 1, target_res_idx + 1);
     } else if (switch_res_direction == -1) {
         target_res_idx = std::max(0, target_res_idx - 1);
     }
     
-    // 2. --- [核心降级逻辑] ---
-    // 从目标分辨率/帧率开始，逐级向下尝试，直到找到匹配项
-    for (int res_idx = target_res_idx; res_idx >= 0; --res_idx)
+    // --- [全新逻辑阶段一：在目标分辨率内进行两轮查找] ---
+    // 我们的首要目标是在不改变分辨率的情况下找到最佳参数。
     {
-        auto target_res = m_resolutions[res_idx];
-        
-        // 确定从此分辨率开始尝试的起始帧率
-        // 如果正在检查的是当前分辨率，就从当前帧率开始；否则从最高帧率开始
-        int start_fps_idx = (res_idx == target_res_idx) ? GetFrameRateIndex(current_fps) : m_frameRates.size() - 1;
+        auto target_res = m_resolutions[target_res_idx];
+        const CodecDataEntry* best_match_for_this_state = nullptr;
+        double best_bitrate_so_far = -1.0;
+
+        // --- 第一轮：稳定优先搜索 ---
+        // 从摄像头当前的帧率开始向下找。这符合你的“压力检测”机制，尽量保持稳定。
+        int start_fps_idx = GetFrameRateIndex(current_fps);
         if (start_fps_idx == -1) start_fps_idx = m_frameRates.size() - 1; // 安全检查
 
-        // 内层循环：遍历帧率 (仅当分辨率为最低档'854x480'时才允许降低帧率)
         for (int fps_idx = start_fps_idx; fps_idx >= 0; --fps_idx)
         {
-            // **关键约束**: 只有在最低分辨率(index 0)时，才允许降低帧率。其他分辨率下只使用其最高帧率。
-            if (res_idx > 0 && fps_idx < (int)m_frameRates.size() - 1) {
-                continue; // 如果不是最低分辨率，则跳过所有非最高帧率的检查
+            // (关键约束不变: 只有最低分辨率才允许大幅降低帧率)
+            if (target_res_idx > 0 && fps_idx < (int)m_frameRates.size() - 1) {
+                continue; 
             }
-            
             int target_fps = m_frameRates[fps_idx];
             
-            // --- 在给定的 分辨率-帧率 组合下查找最佳CRF ---
-            const CodecDataEntry* best_match_for_this_state = nullptr;
-            double best_bitrate_so_far = -1.0;
-
+            // 在给定的 分辨率-帧率 组合下查找最佳CRF
             for (const auto& entry : m_codecDb) {
                 if (entry.width == target_res.first && entry.height == target_res.second && entry.frameRate == target_fps) {
-                    // 检查码率是否满足要求
                     if (entry.avgBitrate_kbps <= target_bitrate_kbps) {
-                        // 在所有低于目标码率的选项里，找一个码率最高的(即CRF最低，画质最好)
                         if (entry.avgBitrate_kbps > best_bitrate_so_far) {
                             best_bitrate_so_far = entry.avgBitrate_kbps;
                             best_match_for_this_state = &entry;
@@ -201,30 +195,72 @@ EncodingParams YtyCodecSimulator::FindBestParams(double target_bitrate_kbps,
                     }
                 }
             }
+        }
 
-            // 如果在这个 分辨率-帧率 组合下找到了匹配项
-            if (best_match_for_this_state) {
-                best_params.found = true;
-                best_params.resolution = best_match_for_this_state->resolution;
-                best_params.frame_rate = best_match_for_this_state->frameRate;
-                best_params.crf = best_match_for_this_state->crf;
-                best_params.actual_bitrate_kbps = best_match_for_this_state->avgBitrate_kbps;
+        // 如果在第一轮（稳定优先）就找到了，或者在第一轮之后进行一次全量搜索找到了，就直接返回
+        if (best_match_for_this_state) {
+            best_params.found = true;
+            best_params.resolution = best_match_for_this_state->resolution;
+            best_params.frame_rate = best_match_for_this_state->frameRate;
+            best_params.crf = best_match_for_this_state->crf;
+            best_params.actual_bitrate_kbps = best_match_for_this_state->avgBitrate_kbps;
 
-                // 评估CRF质量
-                if (best_params.crf <= 20) best_params.qualityLevel = CRF_QUALITY_TOO_HIGH;
-                else if (best_params.crf <= 28) best_params.qualityLevel = CRF_QUALITY_GOOD;
-                else best_params.qualityLevel = CRF_QUALITY_TOO_LOW;
-                
-                // 找到后立刻返回，不再继续降级
-                return best_params;
+            if (best_params.crf <= 20) best_params.qualityLevel = CRF_QUALITY_TOO_HIGH;
+            else if (best_params.crf <= 28) best_params.qualityLevel = CRF_QUALITY_GOOD;
+            else best_params.qualityLevel = CRF_QUALITY_TOO_LOW;
+            
+            return best_params;
+        }
+    }
+
+    // --- [全新逻辑阶段二：紧急降级搜索] ---
+    // 只有在阶段一完全失败（即目标分辨率在任何帧率下都找不到参数）后，才会进入此阶段。
+    // 这就是你想要的“实在找不到码率了才能快速降档”。
+    for (int res_idx = target_res_idx - 1; res_idx >= 0; --res_idx)
+    {
+        auto target_res = m_resolutions[res_idx];
+        const CodecDataEntry* best_match_for_this_state = nullptr;
+        double best_bitrate_so_far = -1.0;
+        
+        // 在紧急降级时，我们总是从最高帧率开始进行最全面的搜索。
+        int start_fps_idx = m_frameRates.size() - 1;
+
+        for (int fps_idx = start_fps_idx; fps_idx >= 0; --fps_idx)
+        {
+            if (res_idx > 0 && fps_idx < (int)m_frameRates.size() - 1) {
+                continue;
             }
-        } // 帧率循环结束
-    } // 分辨率循环结束
+            int target_fps = m_frameRates[fps_idx];
+            
+            for (const auto& entry : m_codecDb) {
+                if (entry.width == target_res.first && entry.height == target_res.second && entry.frameRate == target_fps) {
+                    if (entry.avgBitrate_kbps <= target_bitrate_kbps) {
+                        if (entry.avgBitrate_kbps > best_bitrate_so_far) {
+                            best_bitrate_so_far = entry.avgBitrate_kbps;
+                            best_match_for_this_state = &entry;
+                        }
+                    }
+                }
+            }
+        }
 
-    // 3. --- [最终备用逻辑] ---
-    // 如果经历了所有降级手段（降分辨率 -> 降帧率）还是找不到，
-    // 说明目标码率比我们数据库中最低的码率还要低。
-    // 此时，返回整个数据库中的绝对最低码率配置，以确保程序能继续运行。
+        if (best_match_for_this_state) {
+            best_params.found = true;
+            best_params.resolution = best_match_for_this_state->resolution;
+            best_params.frame_rate = best_match_for_this_state->frameRate;
+            best_params.crf = best_match_for_this_state->crf;
+            best_params.actual_bitrate_kbps = best_match_for_this_state->avgBitrate_kbps;
+
+            if (best_params.crf <= 20) best_params.qualityLevel = CRF_QUALITY_TOO_HIGH;
+            else if (best_params.crf <= 28) best_params.qualityLevel = CRF_QUALITY_GOOD;
+            else best_params.qualityLevel = CRF_QUALITY_TOO_LOW;
+            
+            return best_params;
+        }
+    }
+
+    // --- [最终备用逻辑] ---
+    // 如果经历了所有降级手段还是找不到，返回整个数据库中的绝对最低码率配置。
     const CodecDataEntry* absolute_lowest_config = nullptr;
     double min_bitrate_global = 1e9;
      for (const auto& entry : m_codecDb) {
@@ -243,7 +279,7 @@ EncodingParams YtyCodecSimulator::FindBestParams(double target_bitrate_kbps,
         return best_params;
     }
 
-    return best_params; // 理论上不会执行到这里，因为上面总能找到一个最低配置
+    return best_params;
 }
 
 

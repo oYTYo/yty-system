@@ -38,7 +38,7 @@ class GCCController {
 public:
     // --- 构造函数 ---
     // start_bitrate_kbps 初始码率 (kbps)
-    GCCController(double start_bitrate_kbps = 800.0); // 声明构造函数
+    GCCController(double start_bitrate_kbps = 200.0); // 声明构造函数
 
     // --- 核心入口函数 ---
     // 适配 ns-3 的参数接口，不再接受 json

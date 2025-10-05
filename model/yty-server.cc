@@ -883,6 +883,9 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         // 如果在本周期内没有收到 SET_PARAMS 更新 (即 logIntervalParamUpdateCount == 0)，
         // 则使用上一个周期计算或更新的 VMAF 值 (lastVMAF) 作为本周期的平均值。
         avgVmaf = session.lastVMAF;
+
+        // 增加对 avgActualBitrateKbps 的处理，当没有更新时，使用会话中记录的最后一个实际码率值。
+        avgActualBitrateKbps = session.actualBitrate / 1000.0; // session.actualBitrate 单位是 bps
     }
     
     // --- 在这里计算 QoE 和 Minerva 权重 ---
