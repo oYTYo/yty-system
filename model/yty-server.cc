@@ -38,7 +38,7 @@ NS_OBJECT_ENSURE_REGISTERED(YtyServer);
 
 // 码率的绝对上限和下限，防止码率无限增长或低到无意义
 const double MAX_BITRATE_MBPS = 25.0; // 码率最高不超过 10 Mbps
-const double MIN_BITRATE_KBPS = 100.0; // 码率最低不低于 100 Kbps
+const double MIN_BITRATE_KBPS = 200.0; // 码率最低不低于 100 Kbps
 
 // 单位换算常量
 const double BPS_IN_KBPS = 1000.0; // 1 Kbps = 1000 bps
@@ -676,7 +676,7 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     // --- 后续的拥塞控制和发送反馈逻辑保持不变 ---
     Time avgDelay = (session.intervalReceivedPackets > 0) ? session.intervalTotalDelay / session.intervalReceivedPackets : Seconds(0);
     double bandwidthToReportKbps = session.lastThroughputKbpsForAI;
-    if (lossRate < 0.001 && avgDelay < MilliSeconds(10))
+    if (lossRate < 0.001 && avgDelay < MilliSeconds(10) && session.lastThroughputKbpsForAI >0 )
     {
         double optimisticBw = std::max(session.actualBitrate / 1000.0, session.aiBandwidth / 1000.0) * 1.25;
         bandwidthToReportKbps = std::max(session.lastThroughputKbpsForAI, optimisticBw);
