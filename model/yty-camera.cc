@@ -336,8 +336,8 @@ void YtyCamera::UpdateEncodingParameters(uint32_t bandwidthBps)
         }
     }
 
-    // 2. 检查压力是否达到阈值，决定是否切换分辨率
-    if (m_increaseResPressure >= m_pressureThreshold) {
+    // 2. 检查压力是否达到阈值，决定是否切换分辨率, && m_frameRate >= 30
+    if (m_increaseResPressure >= m_pressureThreshold && m_frameRate >= 30) {
         switch_res_direction = 1; // 触发升档
         m_increaseResPressure = 0; // 清空压力
     } else if (m_decreaseResPressure >= m_pressureThreshold) {

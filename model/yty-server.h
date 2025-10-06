@@ -254,6 +254,10 @@ private:
     std::ofstream m_logFile;
     Time m_logInterval;
 
+    // 追踪特定摄像头对拥塞控制算法的输入输出
+    uint32_t m_traceCameraId;       // 要追踪的摄像头ID
+    std::ofstream m_traceLogFile;   // 追踪日志的文件流
+
 
     // 将每个客户端的IP地址映射到其完整的元数据
     std::map<Ipv4Address, ClientInfo> m_clientInfoRegistry;

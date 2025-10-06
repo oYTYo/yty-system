@@ -73,7 +73,7 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
     }
 
     // [修改] 带宽计算因子调整，原先是为60个摄像头设计的，现在调整为12个
-    double new_kbps = bandwidths_kbps[index] * 12 * 1000 * 2.0 / 3.5;
+    double new_kbps = bandwidths_kbps[index] * 12 * 1000 * 0.5 / 3.5;
     DataRate newRate(std::to_string(new_kbps) + "Kbps");
 
     ChangeBandwidth(devices, newRate);
@@ -88,14 +88,17 @@ int main(int argc, char* argv[])
     // --- [功能保留] AI 和 Minerva 模式开关 ---
     bool useAI = false;
     bool useMinerva = false;
+    // 定义一个变量来接收要追踪的摄像头ID
+    uint32_t traceCameraId = 1; 
     CommandLine cmd;
     cmd.AddValue("useAI", "Enable AI-based congestion control", useAI);
     cmd.AddValue("useMinerva", "Enable Minerva-like QoE-based rate adjustment", useMinerva);
+    cmd.AddValue("traceCameraId", "ID of the camera to trace for congestion control log", traceCameraId);
     cmd.Parse(argc, argv);
 
     // --- 仿真核心参数 ---
     const uint32_t WIRED_CAM_TOTAL = 12; // [修改] 简化为12个有线摄像头
-    const double   simulationTime  = 660.0;
+    const double   simulationTime  = 6.0;
     const uint16_t serverPort      = 9;
 
     // --- 1. 节点创建 ---
@@ -176,6 +179,7 @@ int main(int argc, char* argv[])
     serverHelper.SetAttribute("LogFile", StringValue("scratch/play_status_large_scale.txt"));
     serverHelper.SetAttribute("UseAI", BooleanValue(useAI));
     serverHelper.SetAttribute("UseMinerva", BooleanValue(useMinerva));
+    serverHelper.SetAttribute("TraceCameraId", UintegerValue(traceCameraId));
 
     ApplicationContainer serverApps = serverHelper.Install(serverNode.Get(0));
     serverApps.Start(Seconds(1.0));

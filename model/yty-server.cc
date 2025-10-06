@@ -210,7 +210,11 @@ TypeId YtyServer::GetTypeId(void)
         .AddAttribute("UseMinerva", "Enable Minerva-like QoE-based rate adjustment.",
                       BooleanValue(false), // 默认关闭 Minerva
                       MakeBooleanAccessor(&YtyServer::m_useMinerva),
-                      MakeBooleanChecker());
+                      MakeBooleanChecker())
+        .AddAttribute("TraceCameraId", "Camera ID to trace for congestion control debugging. (0 = disabled)",
+                      UintegerValue(0),
+                      MakeUintegerAccessor(&YtyServer::m_traceCameraId),
+                      MakeUintegerChecker<uint32_t>());
     return tid;
 }
 
@@ -327,6 +331,27 @@ void YtyServer::StartApplication(void)
     {
         m_logFile << "Time(s)\tClientAddr\tCameraId\tThroughput(kbps)\tAvgDelay(ms)\tAvgLossRate\tAvgJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tAccessType\tRegion\tCodec\tAvgAIBandwidth(kbps)\tAvgActualBitrate(kbps)\tAvgVMAF" << std::endl;
     }
+
+    if (m_traceCameraId > 0)
+    {
+        // 这条日志会直接打印到你的终端，告诉我们程序收到了要追踪的ID
+        NS_LOG_UNCOND("Server received request to trace Camera ID: " << m_traceCameraId);
+        
+        std::string traceLogFileName = "scratch/congestion_trace_cam_" + std::to_string(m_traceCameraId) + ".txt";
+        m_traceLogFile.open(traceLogFileName, std::ios::out | std::ios::trunc);
+        
+        if (m_traceLogFile.is_open())
+        {
+            // 如果文件创建成功，也会在终端打印这条信息
+            NS_LOG_UNCOND("Successfully created trace log file at: " << traceLogFileName);
+            m_traceLogFile << "Time(s)\tIn_Throughput(kbps)\tIn_AvgDelay(ms)\tIn_LossRate\tIn_Weight\tState\tOut_TargetBitrate(kbps)" << std::endl;
+        }
+        else
+        {
+            // 如果文件创建失败，会打印一条明确的错误信息
+            NS_LOG_ERROR("Failed to open trace log file: " << traceLogFileName);
+        }
+    }
 }
     
 
@@ -351,6 +376,11 @@ void YtyServer::StopApplication(void)
     {
         m_logFile.flush(); 
         m_logFile.close();
+    }
+
+    if (m_traceLogFile.is_open())
+    {
+        m_traceLogFile.close();
     }
 
     if (m_socket)
@@ -685,6 +715,26 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
 
     // 这个函数会根据m_useAI标志自动选择GCC或AI
     uint32_t targetBitrateBps = GetTargetBitrate(session, bandwidthToReportKbps, avgDelay, lossRate);
+
+    // 如果开启了追踪，并且当前会话的摄像头ID是我们想追踪的那个
+    if (m_traceCameraId > 0 && session.clientInfo.cameraId == m_traceCameraId)
+    {
+        if (m_traceLogFile.is_open())
+        {
+            // 获取算法的内部状态和Minerva权重（如果有）
+            std::string state = m_useAI ? "AI" : session.gccController->get_state_string();
+            double weight = m_useMinerva ? session.smoothedMinervaWeight : 1.0;
+
+            // 写入一行日志，包含所有输入和输出
+            m_traceLogFile << Simulator::Now().GetSeconds() << "\t"
+                           << bandwidthToReportKbps << "\t"
+                           << avgDelay.GetMilliSeconds() << "\t"
+                           << lossRate << "\t"
+                           << weight << "\t"
+                           << state << "\t"
+                           << targetBitrateBps / 1000.0 << std::endl;
+        }
+    }
 
     session.aiBandwidth = targetBitrateBps; // 更新用于日志的aiBandwidth字段
     
