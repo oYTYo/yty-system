@@ -33,6 +33,13 @@ enum class NetworkState {
     Underuse  // 未充分利用: 延迟有降低趋势，可以更积极地增加码率
 };
 
+// 这个结构体不仅包含目标码率，还包含了我们需要的两个决策过程。
+struct GCCResult {
+    double target_bitrate_kbps; // 计算出的目标码率
+    std::string loss_decision;  // 基于丢包的决策 ("increase", "decrease", "hold")
+    std::string delay_decision; // 基于延迟的决策 ("increase", "decrease", "hold")
+};
+
 // --- GCCController 类定义 ---
 class GCCController {
 public:
@@ -42,7 +49,7 @@ public:
 
     // --- 核心入口函数 ---
     // 适配 ns-3 的参数接口，不再接受 json
-    double get_target_bitrate_kbps(double throughputKbps, double delayMs, double lossRate, double rttMs, long long currentTimeMs, double minervaWeight);
+    GCCResult get_target_bitrate_kbps(double throughputKbps, double delayMs, double lossRate, double rttMs, long long currentTimeMs, double minervaWeight);
     
     // --- 辅助函数 ---
     std::string get_state_string() const;

@@ -113,7 +113,7 @@ std::string GCCController::delay_based_control(double delay_ms, long long curren
 }
 
 // get_target_bitrate_kbps 接口适配 ns-3 参数
-double GCCController::get_target_bitrate_kbps(double throughputKbps, double delayMs, double lossRate, double rttMs, long long currentTimeMs, double minervaWeight) {
+GCCResult GCCController::get_target_bitrate_kbps(double throughputKbps, double delayMs, double lossRate, double rttMs, long long currentTimeMs, double minervaWeight) {
     // 移除原始 gcc_server.cpp 中的 JSON 解析部分，直接使用传入的参数
     last_acked_bitrate_bps_ = throughputKbps * BPS_IN_KBPS;
     
@@ -125,7 +125,14 @@ double GCCController::get_target_bitrate_kbps(double throughputKbps, double dela
     current_bitrate_bps_ = std::max(current_bitrate_bps_, MIN_BITRATE_KBPS * BPS_IN_KBPS);
     current_bitrate_bps_ = std::min(current_bitrate_bps_, MAX_BITRATE_MBPS * 1e6); // 1e6 是 MBPS 到 BPS
 
-    return current_bitrate_bps_ / BPS_IN_KBPS;
+    // 创建并填充GCCResult结构体
+    GCCResult result;
+    result.target_bitrate_kbps = current_bitrate_bps_ / BPS_IN_KBPS;
+    result.loss_decision = loss_decision;
+    result.delay_decision = delay_decision;
+
+    // 返回这个包含所有结果的结构体
+    return result;
 }
 
 std::string GCCController::get_state_string() const {
@@ -344,7 +351,7 @@ void YtyServer::StartApplication(void)
         {
             // 如果文件创建成功，也会在终端打印这条信息
             NS_LOG_UNCOND("Successfully created trace log file at: " << traceLogFileName);
-            m_traceLogFile << "Time(s)\tIn_Throughput(kbps)\tIn_AvgDelay(ms)\tIn_LossRate\tIn_Weight\tState\tOut_TargetBitrate(kbps)" << std::endl;
+            m_traceLogFile << "Time(s)\tIn_Throughput(kbps)\tIn_AvgDelay(ms)\tIn_LossRate\tIn_Weight\tLossDecision\tDelayDecision\tState\tOut_TargetBitrate(kbps)" << std::endl;
         }
         else
         {
@@ -703,34 +710,63 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     // 安全检查，确保丢包率不会是负数（可能由于乱序导致 maxSeenSentPackets 更新延迟）
     if (lossRate < 0) lossRate = 0.0;
     
-    // --- 后续的拥塞控制和发送反馈逻辑保持不变 ---
+    // --- [核心修改] 重构获取目标码率和决策的逻辑 ---
     Time avgDelay = (session.intervalReceivedPackets > 0) ? session.intervalTotalDelay / session.intervalReceivedPackets : Seconds(0);
     double bandwidthToReportKbps = session.lastThroughputKbpsForAI;
-    if (lossRate < 0.001 && avgDelay < MilliSeconds(10) && session.lastThroughputKbpsForAI >0 )
+    if (lossRate < 0.001 && avgDelay < MilliSeconds(10) && session.lastThroughputKbpsForAI > 0)
     {
         double optimisticBw = std::max(session.actualBitrate / 1000.0, session.aiBandwidth / 1000.0) * 1.25;
         bandwidthToReportKbps = std::max(session.lastThroughputKbpsForAI, optimisticBw);
     }
 
+    uint32_t targetBitrateBps;
+    std::string loss_decision = "N/A";  // 初始化为"N/A"，适用于AI模式
+    std::string delay_decision = "N/A"; // 初始化为"N/A"，适用于AI模式
+    std::string state;
 
-    // 这个函数会根据m_useAI标志自动选择GCC或AI
-    uint32_t targetBitrateBps = GetTargetBitrate(session, bandwidthToReportKbps, avgDelay, lossRate);
+    if (m_useAI) {
+        // AI模式下，决策过程是黑盒，我们只获取最终码率
+        targetBitrateBps = GetTargetBitrate(session, bandwidthToReportKbps, avgDelay, lossRate);
+        state = "AI"; // 状态直接标记为AI
+    } else {
+        // GCC模式下，调用我们修改过的函数来获取所有结果
+        long long current_time_ms = Simulator::Now().GetMilliSeconds();
+        double weight = session.smoothedMinervaWeight;
+
+        // 调用新接口，接收包含所有结果的 GCCResult 结构体
+        GCCResult gcc_result = session.gccController->get_target_bitrate_kbps(
+                                    bandwidthToReportKbps,
+                                    avgDelay.GetMilliSeconds(),
+                                    lossRate,
+                                    avgDelay.GetMilliSeconds(), // 用延迟近似RTT
+                                    current_time_ms,
+                                    weight
+                                );
+        
+        // 从结果中分别提取所需信息
+        targetBitrateBps = static_cast<uint32_t>(gcc_result.target_bitrate_kbps * 1000.0);
+        loss_decision = gcc_result.loss_decision;
+        delay_decision = gcc_result.delay_decision;
+        state = session.gccController->get_state_string();
+        
+        session.lastAiBitrateDecisionBps = targetBitrateBps;
+    }
 
     // 如果开启了追踪，并且当前会话的摄像头ID是我们想追踪的那个
     if (m_traceCameraId > 0 && session.clientInfo.cameraId == m_traceCameraId)
     {
         if (m_traceLogFile.is_open())
         {
-            // 获取算法的内部状态和Minerva权重（如果有）
-            std::string state = m_useAI ? "AI" : session.gccController->get_state_string();
             double weight = m_useMinerva ? session.smoothedMinervaWeight : 1.0;
 
-            // 写入一行日志，包含所有输入和输出
+            // *** 写入日志时，加入新的决策字段 ***
             m_traceLogFile << Simulator::Now().GetSeconds() << "\t"
                            << bandwidthToReportKbps << "\t"
                            << avgDelay.GetMilliSeconds() << "\t"
                            << lossRate << "\t"
                            << weight << "\t"
+                           << loss_decision << "\t"      // 新增字段
+                           << delay_decision << "\t"     // 新增字段
                            << state << "\t"
                            << targetBitrateBps / 1000.0 << std::endl;
         }
@@ -1043,7 +1079,8 @@ uint32_t YtyServer::GetTargetBitrate(ClientSession& session, double throughputKb
         // 我们使用 smoothedMinervaWeight 以获得更稳定的表现
         double weight = session.smoothedMinervaWeight;
 
-        double target_kbps = session.gccController->get_target_bitrate_kbps(
+        // 1. 先用 GCCResult 类型的变量接收函数返回的结构体
+        GCCResult result = session.gccController->get_target_bitrate_kbps(
                                     throughputKbps,
                                     delay.GetMilliSeconds(),
                                     lossRate,
@@ -1051,6 +1088,10 @@ uint32_t YtyServer::GetTargetBitrate(ClientSession& session, double throughputKb
                                     current_time_ms,
                                     weight  // 将权重传递给GCC控制器
                                 );
+        
+        // 2. 从结构体中提取出我们需要的码率值
+        double target_kbps = result.target_bitrate_kbps;
+        
         session.lastAiBitrateDecisionBps = static_cast<uint32_t>(target_kbps * 1000.0);
         return session.lastAiBitrateDecisionBps;
     }
