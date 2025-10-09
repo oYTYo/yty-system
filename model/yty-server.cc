@@ -693,6 +693,40 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
         return;
     }
 
+
+    // 检查在这个报告周期内是否收到了任何数据包。
+    // `session.hasReceivedAPacket` 是一个保护条件，确保此逻辑只在会话正常开始后才触发，避免在仿真刚开始、第一个包还没到时就误判为宕机。
+    if (session.hasReceivedAPacket && session.intervalReceivedPackets == 0)
+    {
+        // 打印警告日志，方便调试，确认恢复逻辑已被触发
+        NS_LOG_WARN("At time " << now.GetSeconds() 
+                      << "s, Camera " << session.clientInfo.cameraId 
+                      << " appears stalled (no packets in " << interval.GetMilliSeconds() 
+                      << "ms). Sending a low probing bitrate to force recovery.");
+
+        // 1. 定义一个极低的“探测码率”。
+        //    这个值（200kbps）低于H.264数据库中的最低码率（187kbps）,这将强制摄像头的CodecSimulator通过其降级逻辑，选择一个绝对可行的最低配置来恢复视频流。
+        uint32_t probingBitrateBps = 200000; // 150 kbps
+
+        // 2. 直接打包并发送这个探测码率，主动引导摄像头恢复。
+        Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&probingBitrateBps), sizeof(uint32_t));
+        m_socket->SendTo(rtcpPacket, 0, clientAddress);
+        
+        // 3. 更新统计值，以便在日志中记录这次探测行为。
+        session.logIntervalSumAiBandwidthBps += probingBitrateBps;
+        session.logIntervalRtcpCount++;
+
+        // 4. 重置周期统计数据，为下一次真实的统计做准备。
+        session.intervalReceivedBytes = 0;
+        session.intervalTotalDelay = Seconds(0);
+        session.lastReportTime = now;
+        session.lastReportedSentPackets = session.maxSeenSentPackets;
+
+        // 5. 重新安排下一次报告，并【立即返回】，跳过下面所有基于错误输入的GCC计算。
+        ScheduleReport(clientAddress);
+        return;
+    }
+
   
     // 1. 计算在这个统计周期内，发送端总共发送了多少个包。
     //    maxSeenSentPackets 是这个周期内收到的RTP包头里最大的全局序号。
@@ -713,11 +747,13 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     // --- [核心修改] 重构获取目标码率和决策的逻辑 ---
     Time avgDelay = (session.intervalReceivedPackets > 0) ? session.intervalTotalDelay / session.intervalReceivedPackets : Seconds(0);
     double bandwidthToReportKbps = session.lastThroughputKbpsForAI;
-    if (lossRate < 0.001 && avgDelay < MilliSeconds(10) && session.lastThroughputKbpsForAI > 0)
-    {
-        double optimisticBw = std::max(session.actualBitrate / 1000.0, session.aiBandwidth / 1000.0) * 1.25;
-        bandwidthToReportKbps = std::max(session.lastThroughputKbpsForAI, optimisticBw);
-    }
+
+    // // 乐观带宽估计
+    // if (lossRate < 0.001 && avgDelay < MilliSeconds(10) && session.lastThroughputKbpsForAI > 0)
+    // {
+    //     double optimisticBw = std::max(session.actualBitrate / 1000.0, session.aiBandwidth / 1000.0) * 1.25;
+    //     bandwidthToReportKbps = std::max(session.lastThroughputKbpsForAI, optimisticBw);
+    // }
 
     uint32_t targetBitrateBps;
     std::string loss_decision = "N/A";  // 初始化为"N/A"，适用于AI模式
@@ -765,8 +801,8 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
                            << avgDelay.GetMilliSeconds() << "\t"
                            << lossRate << "\t"
                            << weight << "\t"
-                           << loss_decision << "\t"      // 新增字段
-                           << delay_decision << "\t"     // 新增字段
+                           << loss_decision << "\t"
+                           << delay_decision << "\t"
                            << state << "\t"
                            << targetBitrateBps / 1000.0 << std::endl;
         }
