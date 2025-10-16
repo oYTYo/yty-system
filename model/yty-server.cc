@@ -1022,7 +1022,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 
         // 5. 计算 f(QoE) 参考码率 (kbps)
         // 第一轮公式
-        double referenceBitrateKbps = std::exp((session.qoeValue + 55.8085) / 18.2327);
+        double referenceBitrateKbps = std::exp((session.qoeValue - 81.6936) / 8.7634);
         
         // 6. 计算权重 w
         double actualBitrateKbps = session.actualBitrate / 1000.0;
@@ -1158,6 +1158,7 @@ uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double throughputKb
     request_json["delayMs"] = delay.GetMilliSeconds();
     request_json["lossRate"] = lossRate;
     request_json["bitrate_diff"] = bitrate_diff_kbps;
+    request_json["codec"] = session.clientInfo.codec;
     
     std::string request_str = request_json.dump();
     
