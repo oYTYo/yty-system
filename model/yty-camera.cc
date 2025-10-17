@@ -294,6 +294,7 @@ void YtyCamera::SendEncodingParams()
         << "CSeq: 2\r\n" // Use a different CSeq for this new request type
         << "X-Resolution: " << m_resolution << "\r\n"
         << "X-CRF: " << m_crf << "\r\n"
+        << "X-Frame-Rate: " << m_frameRate << "\r\n"
         << "X-Actual-Bitrate: " << m_actualBitrate << "\r\n\r\n";
 
     Ptr<Packet> packet = Create<Packet>((const uint8_t*)msg.str().c_str(), msg.str().length());

@@ -453,6 +453,7 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
                         
                         std::string new_resolution = session.resolution;
                         uint32_t new_crf = session.crf;
+                        uint32_t new_frame_rate = session.frameRate;
                         uint32_t new_actual_bitrate = session.actualBitrate;
 
                         while (std::getline(requestStream, line))
@@ -462,6 +463,7 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
                             }
                             std::string header_res = "X-Resolution: ";
                             std::string header_crf = "X-CRF: ";
+                            std::string header_fr = "X-Frame-Rate: ";
                             std::string header_br = "X-Actual-Bitrate: ";
 
                             if (line.rfind(header_res, 0) == 0) {
@@ -470,9 +472,35 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
                             else if (line.rfind(header_crf, 0) == 0) {
                                 new_crf = std::stoul(line.substr(header_crf.length()));
                             }
+                            else if (line.rfind(header_fr, 0) == 0) {
+                                new_frame_rate = std::stoul(line.substr(header_fr.length()));
+                            }
                             else if (line.rfind(header_br, 0) == 0) {
                                 new_actual_bitrate = std::stoul(line.substr(header_br.length()));
                             }
+                        }
+
+                        // 检查帧率是否真的发生了变化
+                        if (session.frameRate != new_frame_rate)
+                        {
+                            NS_LOG_INFO("At time " << Simulator::Now().GetSeconds() 
+                                        << "s, Server detected FrameRate change for Camera " << session.clientInfo.cameraId
+                                        << " from " << session.frameRate << " to " << new_frame_rate << ". Rescheduling playback.");
+                            
+                            // 1. 更新会话中存储的帧率
+                            session.frameRate = new_frame_rate;
+
+                            // 2. 根据新帧率重新计算合理的卡顿超时时间
+                            if (new_frame_rate > 0) {
+                                session.stutterTimeout = MilliSeconds(1500.0 / new_frame_rate);
+                            }
+
+                            // 3. (最重要) 取消当前正在等待的播放事件，并立即用新的帧率重新安排播放
+                            if (session.playbackEvent.IsPending()) {
+                                Simulator::Cancel(session.playbackEvent);
+                            }
+                            // 立即用新的帧率启动下一次播放调度
+                            SchedulePlayback(from); 
                         }
 
                         session.resolution = new_resolution;
