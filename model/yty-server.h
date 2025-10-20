@@ -18,7 +18,7 @@
 #include <fstream>
 
 #include <memory> 
-
+#include "ns3/data-rate.h"
 
 namespace ns3 {
 
@@ -110,11 +110,16 @@ public:
      */
     void RegisterClientInfo(const Ipv4Address& clientIp, const ClientInfo& info);
 
+    // 公共方法，用于从仿真脚本接收“神谕”（总带宽）
+    void SetTotalBandwidth(DataRate totalBandwidth);
+
 
 protected:
     virtual void DoDispose(void);
 
 private:
+
+    bool m_useOracle; // Oracle 模式的开关
 
     // Minerva 开关
     bool m_useMinerva; // Minerva 机制的开关
@@ -265,6 +270,11 @@ private:
     uint32_t m_traceCameraId;       // 要追踪的摄像头ID
     std::ofstream m_traceLogFile;   // 追踪日志的文件流
 
+    // Oracle 模式所需的成员变量
+    DataRate m_totalOracleBandwidth;            // 存储“神谕”告知的总带宽
+    double m_totalCodecWeight;                  // 所有已连接客户端的总权重
+    std::map<std::string, uint32_t> m_codecCounts;     // 每种编码器的客户端数量
+    std::map<std::string, double> m_codecWeights;      // 每种编码器的权重 H.264: 2.0, H.265: 1.3 ...
 
     // 将每个客户端的IP地址映射到其完整的元数据
     std::map<Ipv4Address, ClientInfo> m_clientInfoRegistry;

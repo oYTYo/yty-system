@@ -24,7 +24,7 @@
 #include <iomanip>
 
 #include <cmath> // 确保包含了 cmath 以使用 exp 和 log
-
+#include "ns3/data-rate.h"
 
 #include <nlohmann/json.hpp>
 // 为方便使用，创建一个别名
@@ -214,6 +214,10 @@ TypeId YtyServer::GetTypeId(void)
                       BooleanValue(false), // 默认关闭AI模式
                       MakeBooleanAccessor(&YtyServer::m_useAI),
                       MakeBooleanChecker())
+        .AddAttribute("UseOracle", "Enable Oracle (all-knowing) congestion control.",
+                      BooleanValue(false), // 默认关闭
+                      MakeBooleanAccessor(&YtyServer::m_useOracle),
+                      MakeBooleanChecker())
         .AddAttribute("UseMinerva", "Enable Minerva-like QoE-based rate adjustment.",
                       BooleanValue(false), // 默认关闭 Minerva
                       MakeBooleanAccessor(&YtyServer::m_useMinerva),
@@ -226,7 +230,7 @@ TypeId YtyServer::GetTypeId(void)
 }
 
 
-YtyServer::YtyServer() : m_useMinerva(false), m_useAI(false), m_socket(0), m_port(9) 
+YtyServer::YtyServer() : m_useOracle(false), m_useMinerva(false), m_useAI(false), m_socket(0), m_port(9), m_totalOracleBandwidth(DataRate("0bps")), m_totalCodecWeight(0.0)
 {
     // 如果启用了AI模式，则初始化ZMQ上下文
     if (m_useAI) {
@@ -308,7 +312,12 @@ void YtyServer::RegisterClientInfo(const Ipv4Address& clientIp, const ClientInfo
                 << ", Region=" << info.region
                 << ", Codec=" << info.codec);
 }
-// ^^^ 新增 ^^^
+
+void YtyServer::SetTotalBandwidth(DataRate totalBandwidth)
+{
+    // 这个函数会被仿真脚本(simple_network.cc) 周期性调用
+    m_totalOracleBandwidth = totalBandwidth;
+}
 
 
 void YtyServer::StartApplication(void)
@@ -320,6 +329,47 @@ void YtyServer::StartApplication(void)
     } else {
         NS_LOG_INFO("没有开启AI通信，使用GCC");
     }
+
+
+    // Oracle 模式初始化
+    if (m_useOracle)
+    {
+        NS_LOG_UNCOND("Oracle mode enabled. Calculating codec weights...");
+        
+        // 1. 定义你需求的权重比例
+        m_codecWeights["H.264"] = 2;
+        m_codecWeights["H.265"] = 1.3;
+        m_codecWeights["VP9"]   = 1.3;
+        m_codecWeights["AV1"]   = 1;
+
+        m_codecCounts.clear();
+        m_totalCodecWeight = 0.0;
+
+        // 2. 遍历所有已注册的客户端，累加总权重
+        // (这依赖于 RegisterClientInfo 必须在 StartApplication 之前被调用，
+        //  在你的仿真脚本中是满足这个条件的)
+        for (auto const& [ip, info] : m_clientInfoRegistry)
+        {
+            std::string codec = info.codec;
+            if (m_codecWeights.count(codec))
+            {
+                m_totalCodecWeight += m_codecWeights[codec];
+                m_codecCounts[codec]++;
+            }
+            else
+            {
+                // 备用：如果codec未知 (例如 "Unknown")，给一个默认权重1.0
+                m_totalCodecWeight += 1.0;
+                m_codecCounts["Unknown"]++;
+                NS_LOG_WARN("Oracle: Unknown codec type '" << codec << "' for CamID " << info.cameraId << ". Using default weight 1.0.");
+            }
+        }
+
+        NS_LOG_UNCOND("Oracle: Total clients = " << m_clientInfoRegistry.size()
+                    << ", Total calculated weight = " << m_totalCodecWeight);
+    }
+    // Oracle 初始化结束
+
 
     if (!m_socket)
     {
@@ -788,13 +838,40 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     std::string delay_decision = "N/A"; // 初始化为"N/A"，适用于AI模式
     std::string state;
 
-    if (m_useAI) {
-        // AI模式下，决策过程是黑盒，我们只获取最终码率
+    // 1. 检查 Oracle 模式
+    if (m_useOracle)
+    {
+        state = "Oracle";
+        double clientWeight = 1.0; // 默认权重
+        
+        // 查找当前客户端的权重
+        if (m_codecWeights.count(session.clientInfo.codec)) {
+            clientWeight = m_codecWeights[session.clientInfo.codec];
+        }
+
+        // 计算该客户端应得的带宽
+        // (总带宽 * (该客户端的权重 / 总权重))
+        double allocatedBps = 0.0;
+        if (m_totalCodecWeight > 0) {
+            // m_totalOracleBandwidth 是 DataRate 对象, .GetBitRate() 返回 bps (uint64_t)
+            allocatedBps = m_totalOracleBandwidth.GetBitRate() * (clientWeight / m_totalCodecWeight);
+        }
+        
+        targetBitrateBps = static_cast<uint32_t>(allocatedBps);
+
+        // 更新这个值，以便日志和可能的AI回退（虽然在Oracle模式下AI不会被调用）
+        session.lastAiBitrateDecisionBps = targetBitrateBps;
+    }
+    else if (m_useAI) {
+        // [注意] 你的 GetTargetBitrate 函数内部也有一层 if(m_useAI)
+        // 我们保持这个结构不变，只修改这里的调用
         targetBitrateBps = GetTargetBitrate(session, bandwidthToReportKbps, avgDelay, lossRate);
         state = "AI"; // 状态直接标记为AI
     } else {
         // GCC模式下，调用我们修改过的函数来获取所有结果
         long long current_time_ms = Simulator::Now().GetMilliSeconds();
+
+        // Minerva或者Oracle
         double weight = session.smoothedMinervaWeight;
 
         // 调用新接口，接收包含所有结果的 GCCResult 结构体
@@ -1121,8 +1198,24 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 // 如果开启了AI模型就用AI模型，没有开启就用GCC
 uint32_t YtyServer::GetTargetBitrate(ClientSession& session, double throughputKbps, Time delay, double lossRate)
 {
-    // 如果AI模式开启，则通过ZMQ从Python脚本获取码率
-    if (m_useAI)
+
+    if (m_useOracle)
+    {
+        // 这部分逻辑与 SendRtcpFeedback 中完全一致
+        double clientWeight = 1.0; 
+        if (m_codecWeights.count(session.clientInfo.codec)) {
+            clientWeight = m_codecWeights[session.clientInfo.codec];
+        }
+        double allocatedBps = 0.0;
+        if (m_totalCodecWeight > 0) {
+            allocatedBps = m_totalOracleBandwidth.GetBitRate() * (clientWeight / m_totalCodecWeight);
+        }
+        uint32_t targetBitrateBps = static_cast<uint32_t>(allocatedBps);
+        session.lastAiBitrateDecisionBps = targetBitrateBps;
+        return targetBitrateBps;
+    }
+    
+    else if (m_useAI)
     {
         // 找到该客户端对应的地址
         Address clientAddress;

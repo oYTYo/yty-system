@@ -65,7 +65,7 @@ void ChangeBandwidth(NetDeviceContainer devices, DataRate newBandwidth)
  * @param bandwidths_kbps 从文件中读取的带宽值向量。
  * @param index 当前在向量中的位置（使用引用传递，以便修改）。
  */
-void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<double>& bandwidths_kbps, uint32_t& index, double simulationTime, double baseMultiplier)
+void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<double>& bandwidths_kbps, uint32_t& index, double simulationTime, double baseMultiplier, Ptr<YtyServer> serverApp, bool useOracle)
 {
     if (index >= bandwidths_kbps.size()) {
         NS_LOG_INFO("Bandwidth schedule finished, restarting from the beginning.");
@@ -76,23 +76,34 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
     double currentTime = Simulator::Now().GetSeconds();
 
     // 根据总仿真时间动态计算各阶段的结束时间点
-    const double segment = (simulationTime - 60.0)  / 3.0;
+    const double segment = (simulationTime - 60.0)  / 5.0;
 
     // 2. 根据时间确定动态缩放比例
     double dynamic_multiplier ; 
+
+
+    dynamic_multiplier = baseMultiplier;
     
-    if (currentTime >= 0.0 && currentTime < 60.0 + segment)
-    {
-        dynamic_multiplier = baseMultiplier + 1.0;  ;
-    }
-    else if (currentTime >= 60.0 + segment && currentTime < 60.0 + segment * 2)
-    {
-        dynamic_multiplier = baseMultiplier;
-    }
-    else
-    {
-        dynamic_multiplier = baseMultiplier - 1.0;
-    }
+    // if (currentTime >= 0.0 && currentTime < 60.0 + segment)
+    // {
+    //     dynamic_multiplier = baseMultiplier;
+    // }
+    // else if (currentTime >= 60.0 + segment && currentTime < 60.0 + segment * 2)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 1.0 ;
+    // }
+    // else if (currentTime >= 60.0 + segment * 2 && currentTime < 60.0 + segment * 3)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 2.0 ;
+    // }
+    // else if (currentTime >= 60.0 + segment * 3 && currentTime < 60.0 + segment * 4)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 3.0 ;
+    // }
+    // else
+    // {
+    //     dynamic_multiplier = baseMultiplier + 4.0 ;
+    // }
     
 
     // [修改] 带宽计算因子调整，原先是为60个摄像头设计的，现在调整为12个
@@ -100,9 +111,15 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
     DataRate newRate(std::to_string(new_kbps) + "Kbps");
 
     ChangeBandwidth(devices, newRate);
+
+    if (useOracle && serverApp)
+    {
+        serverApp->SetTotalBandwidth(newRate);
+    }
+
     index++;
 
-    Simulator::Schedule(Seconds(1.0), &ScheduleNextBandwidthChange, devices, bandwidths_kbps, index, simulationTime, baseMultiplier);
+    Simulator::Schedule(Seconds(1.0), &ScheduleNextBandwidthChange, devices, bandwidths_kbps, index, simulationTime, baseMultiplier, serverApp, useOracle);
 }
 
 
@@ -111,14 +128,15 @@ int main(int argc, char* argv[])
 
     // 仿真时长
     double simulationTime = 660.0;
-    // 增加一个基准带宽乘数，并设置默认值为 5.0
-    double baseMultiplier = 5.0;
+    // 增加一个基准带宽乘数，并设置默认值为 1
+    double baseMultiplier = 1.5;
 
     // --- [功能保留] AI 和 Minerva 模式开关 ---
-    bool useAI = true;
+    bool useAI = false;
     bool useMinerva = false;
+    bool useOracle = false;
     // 定义一个变量来接收要追踪的摄像头ID
-    uint32_t traceCameraId = -1; 
+    uint32_t traceCameraId = 10; 
     CommandLine cmd;
     cmd.AddValue("useAI", "Enable AI-based congestion control", useAI);
     cmd.AddValue("useMinerva", "Enable Minerva-like QoE-based rate adjustment", useMinerva);
@@ -209,6 +227,7 @@ int main(int argc, char* argv[])
     serverHelper.SetAttribute("LogFile", StringValue("scratch/play_status_large_scale.txt"));
     serverHelper.SetAttribute("UseAI", BooleanValue(useAI));
     serverHelper.SetAttribute("UseMinerva", BooleanValue(useMinerva));
+    serverHelper.SetAttribute("UseOracle", BooleanValue(useOracle));
     serverHelper.SetAttribute("TraceCameraId", UintegerValue(traceCameraId));
 
     ApplicationContainer serverApps = serverHelper.Install(serverNode.Get(0));
@@ -278,7 +297,7 @@ int main(int argc, char* argv[])
     {
         static uint32_t bandwidthIndex = 0;
         // [修改] 将动态带宽应用在交换机到服务器的链路上
-        Simulator::ScheduleNow(&ScheduleNextBandwidthChange, switchToServerDevs, bandwidthScheduleKbps, bandwidthIndex, simulationTime, baseMultiplier);
+        Simulator::ScheduleNow(&ScheduleNextBandwidthChange, switchToServerDevs, bandwidthScheduleKbps, bandwidthIndex, simulationTime, baseMultiplier, serverApp, useOracle);
     }
 
     // --- 6. 启动仿真 ---

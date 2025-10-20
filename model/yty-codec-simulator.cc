@@ -225,10 +225,38 @@ EncodingParams YtyCodecSimulator::FindBestParams(double target_bitrate_kbps,
                 best_params.crf = best_match_for_this_state->crf;
                 best_params.actual_bitrate_kbps = best_match_for_this_state->avgBitrate_kbps;
 
-                // 评估CRF质量
-                if (best_params.crf <= 20) best_params.qualityLevel = CRF_QUALITY_TOO_HIGH;
-                else if (best_params.crf <= 28) best_params.qualityLevel = CRF_QUALITY_GOOD;
-                else best_params.qualityLevel = CRF_QUALITY_TOO_LOW;
+
+                // 根据不同的 codec 类型设置动态CRF压力阈值
+                
+                // 1. 定义两个阈值变量
+                int crf_high_quality_threshold; // “质量过高”的CRF上限 (值越小，质量越高)
+                int crf_good_quality_threshold; // “质量良好”的CRF上限
+
+                // 2. m_codecType 是在 YtyCodecSimulator 构造时设置的
+                //    我们根据它来分配不同的阈值
+                if (m_codecType == "H.264") {
+                    crf_high_quality_threshold = 22; 
+                    crf_good_quality_threshold = 29;
+                } else if (m_codecType == "H.265") {
+                    crf_high_quality_threshold = 22; 
+                    crf_good_quality_threshold = 29;
+                } else if (m_codecType == "VP9") {
+                    crf_high_quality_threshold = 22; 
+                    crf_good_quality_threshold = 30;
+                } else { 
+                    crf_high_quality_threshold = 22;
+                    crf_good_quality_threshold = 29;
+                }
+
+                // 3. 评估CRF质量 (使用新的动态阈值)
+                if (best_params.crf <= crf_high_quality_threshold) {
+                    best_params.qualityLevel = CRF_QUALITY_TOO_HIGH;
+                } else if (best_params.crf <= crf_good_quality_threshold) {
+                    best_params.qualityLevel = CRF_QUALITY_GOOD;
+                } else {
+                    best_params.qualityLevel = CRF_QUALITY_TOO_LOW;
+                }
+
                 
                 // 找到后立刻返回，不再继续降级
                 return best_params;
