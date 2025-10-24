@@ -32,6 +32,88 @@ using json = nlohmann::json;
 
 namespace ns3 {
 
+namespace {
+// Minerva的平均带宽效用函数
+// (y_monotonic_avg):
+static const std::vector<double> g_minerva_qoe_data = {
+    72.68324625555556, 80.33331619791667, 83.11193343289689, 86.69318606493506, 
+    89.1289354265403, 90.93413108024691, 91.75154233286908, 91.8827452559055, 
+    92.54758171052632, 92.54758171052632, 93.34413635135135, 93.34413635135135, 
+    93.92623229761905, 94.11436329861111, 94.20016699275362, 95.01230799107142, 
+    95.01230799107142, 95.67521721428571, 95.67521721428571, 95.67521721428571, 
+    95.67521721428571, 95.67521721428571, 95.67521721428571, 95.67521721428571, 
+    95.67521721428571
+};
+
+// Bitrate Data in Mbps (x_binned_avg):
+static const std::vector<double> g_minerva_bitrate_data_mbps = {
+    1.122184577777778, 1.3805583974358975, 1.5900500327332243, 1.8224328571428572, 
+    2.069220213270142, 2.3209053827160493, 2.5467087465181057, 2.763488162729659, 
+    2.9998911943319837, 3.2466350127226464, 3.492118108108108, 3.7161873188405794, 
+    3.956822333333333, 4.17658125, 4.413889927536232, 4.659185, 
+    4.8799874999999995, 5.091888, 5.375009199999999, 5.597381666666667, 
+    5.824596666666667, 6.059490769230769, 6.3447216666666675, 6.562622, 
+    6.845560909090909
+};
+
+/**
+ * @brief 线性插值函数，等同于 numpy.interp(target_y, y_vec, x_vec)
+ * @param target_y 目标 QoE (y 轴)
+ * @param y_vec 已知的 QoE 向量 (y 轴, 必须单调递增)
+ * @param x_vec 已知的 Bitrate 向量 (x 轴)
+ * @return double 插值后的 Bitrate (单位: Mbps)
+ */
+static double interpolate_qoe_to_bitrate_mbps(double target_y, const std::vector<double>& y_vec, const std::vector<double>& x_vec)
+{
+    if (y_vec.empty() || x_vec.empty() || y_vec.size() != x_vec.size()) {
+        // 异常处理：返回一个安全的回退值 (例如 1.0 Mbps)
+        return 1.0; 
+    }
+
+    // 1. 处理边界情况 (QoE 超出拟合范围)
+    if (target_y <= y_vec.front()) {
+        return x_vec.front();
+    }
+    if (target_y >= y_vec.back()) {
+        return x_vec.back();
+    }
+
+    // 2. 查找插值区间
+    // 找到第一个 *不小于* target_y 的元素
+    auto it = std::lower_bound(y_vec.begin(), y_vec.end(), target_y);
+
+    // 如果精确匹配
+    if (*it == target_y) {
+        size_t i = std::distance(y_vec.begin(), it);
+        return x_vec[i];
+    }
+
+    // 3. 执行线性插值
+    // target_y 位于 (it-1) 和 (it) 之间
+    size_t i2 = std::distance(y_vec.begin(), it);
+    size_t i1 = i2 - 1;
+
+    double y2 = y_vec[i2];
+    double y1 = y_vec[i1];
+    double x2 = x_vec[i2];
+    double x1 = x_vec[i1];
+
+    // 防止除以零 (尽管 y_vec 单调递增，理论上不会发生)
+    if (y2 == y1) {
+        return x1;
+    }
+
+    // 插值比例
+    double ratio = (target_y - y1) / (y2 - y1);
+    
+    // 计算对应的 x (Bitrate in Mbps)
+    return x1 + ratio * (x2 - x1);
+}
+
+} // 匿名命名空间结束
+// Minerva 集成代码结束
+
+
 NS_LOG_COMPONENT_DEFINE("YtyServerApplication");
 NS_OBJECT_ENSURE_REGISTERED(YtyServer);
 
@@ -173,8 +255,8 @@ void GCCController::update_bitrate(const std::string& loss_decision, const std::
             // 还原为 gcc_server.cpp 中的值：50000.0
             double additive_increase_bps = std::max(50000.0, alpha * (AVERAGE_PACKET_SIZE_BYTES * 8000.0) / response_time_ms);
             
-            current_bitrate_bps_ += additive_increase_bps;
-            // current_bitrate_bps_ += (additive_increase_bps * clampedWeight);  // 可选项：修改加性增的幅度
+            // current_bitrate_bps_ += additive_increase_bps;
+            current_bitrate_bps_ += (additive_increase_bps * clampedWeight);  // 可选项：修改加性增的幅度
 
         } else { // state_ == NetworkState::Underuse
             // 还原为 gcc_server.cpp 中的值：1.15
@@ -1123,11 +1205,19 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 
         // 4. 计算 QoE
         // QoE = VMAF - 25 * StutterRate - 2.5 * abs(VMAF_Jitter)
-        session.qoeValue = currentVMAF - 25.0 * stutterRate - 2.5 * std::abs(vmafJitter);
+        session.qoeValue = currentVMAF - 75.0 * stutterRate - 2.5 * std::abs(vmafJitter);
 
         // 5. 计算 f(QoE) 参考码率 (kbps)
         // 第一轮公式
-        double referenceBitrateKbps = std::exp((session.qoeValue - 81.6936) / 8.7634);
+        // double referenceBitrateKbps = std::exp((session.qoeValue - 81.6936) / 8.7634);
+
+        // 5. 替换掉对数回归
+        double referenceBitrateMbps = interpolate_qoe_to_bitrate_mbps(
+            session.qoeValue, 
+            g_minerva_qoe_data,     // 使用新的 QoE 数据
+            g_minerva_bitrate_data_mbps // 使用新的码率数据
+        );
+        double referenceBitrateKbps = referenceBitrateMbps * 1000.0;
         
         // 6. 计算权重 w
         double actualBitrateKbps = session.actualBitrate / 1000.0;
