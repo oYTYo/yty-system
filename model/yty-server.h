@@ -40,6 +40,16 @@ struct GCCResult {
     std::string delay_decision; // 基于延迟的决策 ("increase", "decrease", "hold")
 };
 
+
+// 定义一个结构体来存储50ms的指标样本，这个结构体主要是收集传输层指标的序列给RL模型使用的
+struct TransportMetricSample {
+    double throughputKbps;
+    double delayMs;
+    double lossRate;
+    double jitterMs;
+};
+
+
 // --- GCCController 类定义 ---
 class GCCController {
 public:
@@ -192,6 +202,12 @@ private:
         double   minervaWeight;         // 当前计算出的Minerva权重 w
         double   smoothedMinervaWeight;
 
+        // AI强化学习所需的变量
+        double   aiControlledWeight;    // 最终决策的权重 (AI或Minerva)，供50ms循环使用
+        std::vector<TransportMetricSample> metricSamples; // 存储1秒内(20个)50ms的指标样本
+        std::string lastAiStateJson;    // 存储上一个周期的聚合状态 (S_t)
+        double   lastAiActionWeight;    // 存储上一个周期的AI动作 (A_t)
+
         // 构造函数
         ClientSession() :
             intervalReceivedPackets(0),
@@ -232,7 +248,10 @@ private:
             lastVMAF(80.0), // 给予一个合理的初始值，避免第一次计算抖动过大
             qoeValue(0.0),
             minervaWeight(1.0), // 权重默认为1，即不产生影响
-            smoothedMinervaWeight(1.0) // 平滑权重的初始值也设为1.0
+            smoothedMinervaWeight(1.0), // 平滑权重的初始值也设为1.0
+            aiControlledWeight(1.0),         // 默认权重为1.0
+            lastAiStateJson(""),             // 初始状态为空
+            lastAiActionWeight(1.0)          // 初始动作权重为1.0
             
         {
         }

@@ -110,6 +110,38 @@ static double interpolate_qoe_to_bitrate_mbps(double target_y, const std::vector
     return x1 + ratio * (x2 - x1);
 }
 
+
+// +++ 新增: 状态聚合辅助函数 +++
+std::string AggregateState(const std::vector<TransportMetricSample>& samples, 
+                           double avgVmaf, 
+                           double stutterRate, 
+                           double vmafJitter, // <-- 新增 vmafJitter
+                           const std::string& codec) 
+{
+    json state_json;
+
+    // 1. (新) 序列化完整的50ms指标样本
+    json metric_samples_json = json::array();
+    for (const auto& s : samples) {
+        metric_samples_json.push_back({
+            s.throughputKbps,
+            s.delayMs,
+            s.lossRate,
+            s.jitterMs
+        });
+    }
+    state_json["metric_samples"] = metric_samples_json; // 这是一个 20x4 的数组
+
+    // 2. (新) 序列化宏观标量
+    state_json["last_vmaf"] = avgVmaf;
+    state_json["last_stutter_rate"] = stutterRate;
+    state_json["last_vmaf_jitter"] = vmafJitter; // <-- 新增
+    state_json["codec"] = codec;
+    
+    return state_json.dump();
+}
+
+
 } // 匿名命名空间结束
 // Minerva 集成代码结束
 
@@ -904,116 +936,102 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     // 安全检查，确保丢包率不会是负数（可能由于乱序导致 maxSeenSentPackets 更新延迟）
     if (lossRate < 0) lossRate = 0.0;
     
-    // --- [核心修改] 重构获取目标码率和决策的逻辑 ---
     Time avgDelay = (session.intervalReceivedPackets > 0) ? session.intervalTotalDelay / session.intervalReceivedPackets : Seconds(0);
-    double bandwidthToReportKbps = session.lastThroughputKbpsForAI;
-
-    // // 乐观带宽估计
-    // if (lossRate < 0.001 && avgDelay < MilliSeconds(10) && session.lastThroughputKbpsForAI > 0)
-    // {
-    //     double optimisticBw = std::max(session.actualBitrate / 1000.0, session.aiBandwidth / 1000.0) * 1.25;
-    //     bandwidthToReportKbps = std::max(session.lastThroughputKbpsForAI, optimisticBw);
-    // }
+    // (*** 注意 ***: bandwidthToReportKbps 是您用于GCC的吞吐量，而不是 session.lastThroughputKbpsForAI)
+    // (我在这里使用 session.lastThroughputKbpsForAI，因为它在 LogPlaybackStats 中被更新)
+    // (您在 simple_network.cc 中更新了吞吐量计算，这很好，我们用那个)
+    double bandwidthToReportKbps = session.lastThroughputKbpsForAI; // (从1s循环更新)
+    if (session.intervalReceivedPackets > 0) { // (用50ms的瞬时值覆盖，如果存在)
+         bandwidthToReportKbps = (session.intervalReceivedBytes * 8.0) / interval.GetSeconds() / 1000.0;
+    }
 
     uint32_t targetBitrateBps;
     std::string loss_decision = "N/A";  // 初始化为"N/A"，适用于AI模式
     std::string delay_decision = "N/A"; // 初始化为"N/A"，适用于AI模式
     std::string state;
 
-    // 1. 检查 Oracle 模式
+    // 1: 收集状态样本
+    // (确保 session.jitter 已经在 ProcessRtp 中计算)
+    double jitterMs = session.jitter * 1000.0; // 从秒转换为毫秒
+    session.metricSamples.push_back({
+        bandwidthToReportKbps,
+        avgDelay.GetMilliSeconds(),
+        lossRate,
+        jitterMs
+    });
+
+
+    // 2: 运行50ms的GCC战术循环
+    // 1. 获取由1s循环设定的"战略权重"
+    double weight_to_use = session.aiControlledWeight;
+    
+    // 2. 运行GCC，传入该权重
+    GCCResult gcc_result = session.gccController->get_target_bitrate_kbps(
+                                bandwidthToReportKbps,
+                                avgDelay.GetMilliSeconds(),
+                                lossRate,
+                                avgDelay.GetMilliSeconds(),
+                                Simulator::Now().GetMilliSeconds(),
+                                weight_to_use
+                            );
+    
+    targetBitrateBps = static_cast<uint32_t>(gcc_result.target_bitrate_kbps * 1000.0);
+    loss_decision = gcc_result.loss_decision;
+    delay_decision = gcc_result.delay_decision;
+    state = session.gccController->get_state_string();
+
+    // 3. (兼容性) 允许Oracle模式覆盖GCC的决策
     if (m_useOracle)
     {
         state = "Oracle";
-        double clientWeight = 1.0; // 默认权重
-        
-        // 查找当前客户端的权重
+        double clientWeight = 1.0; 
         if (m_codecWeights.count(session.clientInfo.codec)) {
             clientWeight = m_codecWeights[session.clientInfo.codec];
         }
-
-        // 计算该客户端应得的带宽
-        // (总带宽 * (该客户端的权重 / 总权重))
         double allocatedBps = 0.0;
         if (m_totalCodecWeight > 0) {
-            // m_totalOracleBandwidth 是 DataRate 对象, .GetBitRate() 返回 bps (uint64_t)
             allocatedBps = m_totalOracleBandwidth.GetBitRate() * (clientWeight / m_totalCodecWeight);
         }
-        
         targetBitrateBps = static_cast<uint32_t>(allocatedBps);
-
-        // 更新这个值，以便日志和可能的AI回退（虽然在Oracle模式下AI不会被调用）
-        session.lastAiBitrateDecisionBps = targetBitrateBps;
-    }
-    else if (m_useAI) {
-        // [注意] 你的 GetTargetBitrate 函数内部也有一层 if(m_useAI)
-        // 我们保持这个结构不变，只修改这里的调用
-        targetBitrateBps = GetTargetBitrate(session, bandwidthToReportKbps, avgDelay, lossRate);
-        state = "AI"; // 状态直接标记为AI
-    } else {
-        // GCC模式下，调用我们修改过的函数来获取所有结果
-        long long current_time_ms = Simulator::Now().GetMilliSeconds();
-
-        // Minerva或者Oracle
-        double weight = session.smoothedMinervaWeight;
-
-        // 调用新接口，接收包含所有结果的 GCCResult 结构体
-        GCCResult gcc_result = session.gccController->get_target_bitrate_kbps(
-                                    bandwidthToReportKbps,
-                                    avgDelay.GetMilliSeconds(),
-                                    lossRate,
-                                    avgDelay.GetMilliSeconds(), // 用延迟近似RTT
-                                    current_time_ms,
-                                    weight
-                                );
-        
-        // 从结果中分别提取所需信息
-        targetBitrateBps = static_cast<uint32_t>(gcc_result.target_bitrate_kbps * 1000.0);
-        loss_decision = gcc_result.loss_decision;
-        delay_decision = gcc_result.delay_decision;
-        state = session.gccController->get_state_string();
-        
         session.lastAiBitrateDecisionBps = targetBitrateBps;
     }
 
-    // 如果开启了追踪，并且当前会话的摄像头ID是我们想追踪的那个
+
+    // 3: 更新追踪日志
     if (m_traceCameraId > 0 && session.clientInfo.cameraId == m_traceCameraId)
     {
         if (m_traceLogFile.is_open())
         {
-            double weight = m_useMinerva ? session.smoothedMinervaWeight : 1.0;
-
-            // *** 写入日志时，加入新的决策字段 ***
             m_traceLogFile << Simulator::Now().GetSeconds() << "\t"
                            << bandwidthToReportKbps << "\t"
                            << avgDelay.GetMilliSeconds() << "\t"
                            << lossRate << "\t"
-                           << weight << "\t"
-                           << loss_decision << "\t"
-                           << delay_decision << "\t"
+                           << weight_to_use << "\t" // <-- 记录AI/Minerva设定的权重
+                           << (m_useOracle ? "N/A" : loss_decision) << "\t"
+                           << (m_useOracle ? "N/A" : delay_decision) << "\t"
                            << state << "\t"
                            << targetBitrateBps / 1000.0 << std::endl;
         }
     }
 
     session.aiBandwidth = targetBitrateBps; // 更新用于日志的aiBandwidth字段
-    
-    session.logIntervalSumAiBandwidthBps += targetBitrateBps; // 在这里累加服务器计算出的建议带宽
+    session.logIntervalSumAiBandwidthBps += targetBitrateBps; 
 
     Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&targetBitrateBps), sizeof(uint32_t));
     m_socket->SendTo(rtcpPacket, 0, clientAddress);
 
-    // --- 重置统计数据，为下一个周期做准备 ---
+    // --- 重置50ms周期的统计数据 ---
+    // (*** 注意 ***: 我们需要将50ms周期的统计累加到1s周期的累加器中)
     session.logIntervalSumDelay += avgDelay;
     session.logIntervalSumLossRate += lossRate;
-    session.logIntervalSumJitter += session.jitter;
+    session.logIntervalSumJitter += session.jitter; // (LogPlaybackStats会*1000)
     session.logIntervalRtcpCount++;
 
+    // (重置50ms的瞬时计数器)
     session.intervalReceivedPackets = 0;
     session.intervalReceivedBytes = 0;
     session.intervalTotalDelay = Seconds(0);
     session.lastReportTime = now;
-    
-    // 将本周期看到的最大序列号，保存起来，作为下个周期的计算基准。
     session.lastReportedSentPackets = session.maxSeenSentPackets;
 
     ScheduleReport(clientAddress);
@@ -1127,27 +1145,22 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 
     ClientSession& session = m_sessions[clientAddress];
     
-    // --- 计算播放统计 ---
+    // --- 计算播放统计 (保持不变) ---
     double stutterRate = 0;
     if ((session.playedFrames + session.stutterEvents) > 0)
     {
         stutterRate = static_cast<double>(session.stutterEvents) / (session.playedFrames + session.stutterEvents);
     }
 
-    // --- 在此统一计算1秒日志周期的各项指标 ---
+    // --- 计算1秒日志周期的各项指标 (保持不变) ---
     Time logIntervalDuration = Simulator::Now() - session.logIntervalStartTime;
     double throughputKbps = 0.0;
-    // 确保时长大于0，避免除零错误
     if (logIntervalDuration.GetSeconds() > 0)
     {
-        // 计算吞吐量，单位是 Kbps
-        // (字节 * 8.0) -> 比特; (/ 时长) -> bps; (/ 1000.0) -> Kbps
         throughputKbps = (session.logIntervalReceivedBytes * 8.0) / logIntervalDuration.GetSeconds() / 1000.0;
     }
-    // 更新供AI模块使用的缓存值
-    session.lastThroughputKbpsForAI = throughputKbps;
+    session.lastThroughputKbpsForAI = throughputKbps; // <-- 更新吞吐量
 
-    // 计算其他指标的平均值
     double avgDelayMs = 0.0;
     double avgLossRate = 0.0;
     double avgJitterMs = 0.0;
@@ -1157,93 +1170,119 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         avgLossRate = session.logIntervalSumLossRate / session.logIntervalRtcpCount;
         avgJitterMs = (session.logIntervalSumJitter / session.logIntervalRtcpCount) * 1000.0; // 转换为毫秒
     }
-
-    // 计算可用带宽、实际码率和VMAF的平均值
+    
     double avgAiBandwidthKbps = 0.0;
     if (session.logIntervalRtcpCount > 0) {
-        // 用累加的总带宽(bps)除以RTCP反馈次数，再换算成kbps
         avgAiBandwidthKbps = (session.logIntervalSumAiBandwidthBps / session.logIntervalRtcpCount) / 1000.0;
     }
 
     double avgActualBitrateKbps = 0.0;
     double avgVmaf = 0.0;
     if (session.logIntervalParamUpdateCount > 0) {
-        // 用累加的实际码率(bps)除以参数更新次数，再换算成kbps
         avgActualBitrateKbps = (session.logIntervalSumActualBitrateBps / session.logIntervalParamUpdateCount) / 1000.0;
-        // 用累加的VMAF分数除以参数更新次数
         avgVmaf = session.logIntervalSumVmaf / session.logIntervalParamUpdateCount;
     }
-    // 处理 logIntervalParamUpdateCount 为 0 的情况 +++
     else 
     {
-        // 如果在本周期内没有收到 SET_PARAMS 更新 (即 logIntervalParamUpdateCount == 0)，
-        // 则使用上一个周期计算或更新的 VMAF 值 (lastVMAF) 作为本周期的平均值。
         avgVmaf = session.lastVMAF;
     }
     
-    // --- 在这里计算 QoE 和 Minerva 权重 ---
-    if (m_useMinerva)
+    
+    // --- 1. 计算奖励 (Reward) ---
+    // (您现有的Minerva QoE计算逻辑)
+    double vmafJitter = std::abs(avgVmaf - session.lastVMAF); // <-- 计算 vmafJitter
+    double reward = avgVmaf - 75.0 * stutterRate - 2.5 * vmafJitter;
+    session.qoeValue = reward;
+    session.lastVMAF = avgVmaf; 
+
+    // --- 2. 聚合状态 (State) ---
+    // (调用新的聚合函数，传入 vmafJitter)
+    std::string currentStateJson = AggregateState(
+        session.metricSamples, 
+        avgVmaf, 
+        stutterRate, 
+        vmafJitter, // <-- 传入
+        session.clientInfo.codec
+    );
+    session.metricSamples.clear(); // 清空样本
+
+    // --- 3. 运行1秒战略决策 (AI, Minerva, 或 GCC) ---
+    if (m_useAI)
     {
-        // 1. 分解分辨率字符串 "1920x1080"
-        int width = 0, height = 0;
-        size_t x_pos = session.resolution.find('x');
-        if (x_pos != std::string::npos) {
+        // --- AI (RL) 决策流程 ---
+        if (m_zmq_sockets.find(clientAddress) == m_zmq_sockets.end()) {
+            NS_LOG_INFO("Creating new ZMQ REQ socket for client " << session.clientInfo.cameraId);
+            m_zmq_sockets[clientAddress] = std::make_unique<zmq::socket_t>(*m_zmq_context, ZMQ_REQ);
+            m_zmq_sockets[clientAddress]->connect("tcp://localhost:5556");
+        }
+        auto& socket = m_zmq_sockets[clientAddress];
+
+        // 1. 构建ZMQ请求 (S_t, A_t, R_t+1, S_t+1)
+        json request_json;
+        request_json["cameraId"] = session.clientInfo.cameraId;
+        request_json["last_state"] = session.lastAiStateJson;
+        request_json["last_action_weight"] = session.lastAiActionWeight; // 上一秒的动作(权重)
+        request_json["current_reward"] = reward;                  // 这一秒的奖励(QoE)
+        request_json["current_state"] = currentStateJson;         // 这一秒的状态 (包含完整向量)
+        
+        std::string request_str = request_json.dump();
+        
+        // 2. 发送和接收
+        socket->send(zmq::buffer(request_str), zmq::send_flags::none);
+        zmq::message_t reply;
+        
+        double newWeight = 1.0; // 失败时的默认权重
+        if (socket->recv(reply, zmq::recv_flags::none)) {
+            std::string reply_str = reply.to_string();
             try {
-                width = std::stoi(session.resolution.substr(0, x_pos));
-                height = std::stoi(session.resolution.substr(x_pos + 1));
+                json reply_json = json::parse(reply_str);
+                // *** AI Python端应返回 "targetWeight" ***
+                newWeight = reply_json["targetWeight"]; 
             } catch (const std::exception& e) {
-                // 解析失败则使用默认值
-                width = 1280; height = 720;
+                NS_LOG_WARN("AI JSON parse error: " << e.what() << ". Using default weight 1.0.");
             }
+        } else {
+             NS_LOG_WARN("No reply from AI. Using default weight 1.0.");
         }
 
-        // 2. 查询当前 VMAF
-        double currentVMAF = GetVmafForParams(session.clientInfo.codec, width, height, session.crf);
-
-        // 3. 计算 VMAF 抖动
-        double vmafJitter = currentVMAF - session.lastVMAF;
-
-        // 4. 计算 QoE
-        // QoE = VMAF - 25 * StutterRate - 2.5 * abs(VMAF_Jitter)
-        session.qoeValue = currentVMAF - 75.0 * stutterRate - 2.5 * std::abs(vmafJitter);
-
-        // 5. 计算 f(QoE) 参考码率 (kbps)
-        // 第一轮公式
-        // double referenceBitrateKbps = std::exp((session.qoeValue - 81.6936) / 8.7634);
-
-        // 5. 替换掉对数回归
+        // 3. 应用新权重 (A_t+1) 并存储状态 (S_t+1, A_t+1)
+        session.aiControlledWeight = std::max(0.5, std::min(newWeight, 2.0)); // 限制范围
+        session.lastAiStateJson = currentStateJson;
+        session.lastAiActionWeight = session.aiControlledWeight;
+    }
+    else if (m_useMinerva)
+    {
+        // --- Minerva 启发式决策流程 (恢复您原有的逻辑) ---
         double referenceBitrateMbps = interpolate_qoe_to_bitrate_mbps(
             session.qoeValue, 
-            g_minerva_qoe_data,     // 使用新的 QoE 数据
-            g_minerva_bitrate_data_mbps // 使用新的码率数据
+            g_minerva_qoe_data,     
+            g_minerva_bitrate_data_mbps 
         );
         double referenceBitrateKbps = referenceBitrateMbps * 1000.0;
         
-        // 6. 计算权重 w
-        double actualBitrateKbps = session.actualBitrate / 1000.0;
-        if (referenceBitrateKbps > 1.0) // 防止除以零
+        double actualBitrateKbps = (session.logIntervalParamUpdateCount > 0) ? avgActualBitrateKbps : (session.actualBitrate / 1000.0);
+        if (referenceBitrateKbps > 1.0) 
         {
             session.minervaWeight = actualBitrateKbps / referenceBitrateKbps;
         }
         else
         {
-            session.minervaWeight = 1.0; // 异常情况，不调整
+            session.minervaWeight = 1.0; 
         }
 
-        // 使用 EWMA 平滑权重
-        // Minerva 论文中建议的平滑因子是 0.1 (新值占10%，旧值占90%)
-        // w_smooth = 0.1 * w_current + 0.9 * w_smooth_old
         const double alpha = 0.1;
         session.smoothedMinervaWeight = alpha * session.minervaWeight + (1.0 - alpha) * session.smoothedMinervaWeight;
-
-
-        // 7. 更新上一次的 VMAF 值，为下个周期做准备
-        session.lastVMAF = currentVMAF;
-
+        
+        // 应用Minerva的决策
+        session.aiControlledWeight = session.smoothedMinervaWeight;
     }
-
+    else
+    {
+        // --- 纯 GCC 决策流程 ---
+        session.aiControlledWeight = 1.0; // 权重为1
+    }
     
-    // 将计算好的各项指标写入日志文件
+    // --- 4. 日志记录 (保持不变) ---
     if (m_logFile.is_open())
     {
         m_logFile << Simulator::Now().GetSeconds() << "\t"
@@ -1259,12 +1298,12 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
                   << session.clientInfo.accessType << "\t"
                   << session.clientInfo.region << "\t"
                   << session.clientInfo.codec << "\t"
-                  << avgAiBandwidthKbps << "\t"   // 使用计算出的平均值
-                  << avgActualBitrateKbps << "\t" // 使用计算出的平均值
-                  << avgVmaf << '\n';            // 使用计算出的平均VMAF
+                  << avgAiBandwidthKbps << "\t"
+                  << avgActualBitrateKbps << "\t"
+                  << avgVmaf << '\n';
     }
     
-    // 为下一个日志周期重置所有相关的统计量
+    // --- 5. 为下一个日志周期重置所有相关的统计量 (保持不变) ---
     session.playedFrames = 0;
     session.stutterEvents = 0;
     session.logIntervalSumDelay = Seconds(0);
@@ -1273,8 +1312,6 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     session.logIntervalRtcpCount = 0;
     session.logIntervalReceivedBytes = 0;
     session.logIntervalStartTime = Simulator::Now();
-    
-    // 重置新增的累加器
     session.logIntervalSumAiBandwidthBps = 0.0;
     session.logIntervalSumActualBitrateBps = 0.0;
     session.logIntervalSumVmaf = 0.0;
