@@ -86,23 +86,23 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
     
     // if (currentTime >= 0.0 && currentTime < 60.0 + segment)
     // {
-    //     dynamic_multiplier = baseMultiplier;
+    //     dynamic_multiplier = baseMultiplier - 0.5;
     // }
     // else if (currentTime >= 60.0 + segment && currentTime < 60.0 + segment * 2)
     // {
-    //     dynamic_multiplier = baseMultiplier + 1.0 ;
+    //     dynamic_multiplier = baseMultiplier + 0.5;
     // }
     // else if (currentTime >= 60.0 + segment * 2 && currentTime < 60.0 + segment * 3)
     // {
-    //     dynamic_multiplier = baseMultiplier + 2.0 ;
+    //     dynamic_multiplier = baseMultiplier + 1.5;
     // }
     // else if (currentTime >= 60.0 + segment * 3 && currentTime < 60.0 + segment * 4)
     // {
-    //     dynamic_multiplier = baseMultiplier + 3.0 ;
+    //     dynamic_multiplier = baseMultiplier + 2.0;
     // }
     // else
     // {
-    //     dynamic_multiplier = baseMultiplier + 4.0 ;
+    //     dynamic_multiplier = baseMultiplier + 2.5;
     // }
     
 
@@ -130,9 +130,11 @@ int main(int argc, char* argv[])
     double simulationTime = 660.0;
     // 增加一个基准带宽乘数，并设置默认值为 1
     double baseMultiplier = 1.5;
+    // 带宽读取开始行数
+    uint32_t startLine = 1;
 
     // --- [功能保留] AI 和 Minerva 模式开关 ---
-    bool useAI = false;
+    bool useAI = true;
     bool useMinerva = false;
     bool useOracle = false;
     // 定义一个变量来接收要追踪的摄像头ID
@@ -295,7 +297,7 @@ int main(int argc, char* argv[])
     // 如果成功读取到带宽数据，则启动动态变化逻辑
     if (!bandwidthScheduleKbps.empty())
     {
-        static uint32_t bandwidthIndex = 0;
+        static uint32_t bandwidthIndex = startLine - 1;
         // [修改] 将动态带宽应用在交换机到服务器的链路上
         Simulator::ScheduleNow(&ScheduleNextBandwidthChange, switchToServerDevs, bandwidthScheduleKbps, bandwidthIndex, simulationTime, baseMultiplier, serverApp, useOracle);
     }
