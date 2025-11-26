@@ -18,6 +18,8 @@
 #include <fstream>
 
 #include <memory> 
+#include <set>
+
 #include "ns3/data-rate.h"
 
 namespace ns3 {
@@ -186,6 +188,9 @@ private:
         double   logIntervalSumActualBitrateBps;   // 用于累加摄像头实际上报的码率 (bps)
         double   logIntervalSumVmaf;               // 用于累加根据分辨率和CRF计算出的VMAF分数
         uint32_t logIntervalParamUpdateCount;      // 记录摄像头参数更新的次数，用于计算码率和VMAF的平均值
+        double   logIntervalSumCrf;                // 用于累加CRF值
+        double   logIntervalSumFrameRate;          // 用于累加编码帧率
+        std::set<std::string> logIntervalResolutions; // 用于存储这1s内出现过的所有分辨率（自动去重）
 
         // 直接包含一个ClientInfo结构体 VVV
         ClientInfo clientInfo;
@@ -238,6 +243,9 @@ private:
             logIntervalSumActualBitrateBps(0.0),
             logIntervalSumVmaf(0.0),
             logIntervalParamUpdateCount(0),
+            logIntervalSumCrf(0.0),       // 初始化为0
+            logIntervalSumFrameRate(0.0), // 初始化为0
+            // logIntervalResolutions 不需要显式初始化，默认为空
             resolution("N/A"),
             crf(0),
             actualBitrate(0),

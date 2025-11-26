@@ -500,7 +500,7 @@ void YtyServer::StartApplication(void)
     m_logFile.open(m_logFileName, std::ios::out | std::ios::trunc);
     if (m_logFile.is_open())
     {
-        m_logFile << "Time(s)\tClientAddr\tCameraId\tThroughput(kbps)\tAvgDelay(ms)\tAvgLossRate\tAvgJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tAccessType\tRegion\tCodec\tAvgAIBandwidth(kbps)\tAvgActualBitrate(kbps)\tAvgVMAF" << std::endl;
+        m_logFile << "Time(s)\tClientAddr\tCameraId\tThroughput(kbps)\tAvgDelay(ms)\tAvgLossRate\tAvgJitter(ms)\tPlayedFrames\tStutterEvents\tStutterRate\tAccessType\tRegion\tCodec\tAvgAIBandwidth(kbps)\tAvgActualBitrate(kbps)\tAvgVMAF\tAvgCRF\tResolution\tEncoding_fps" << std::endl;
     }
 
     if (m_traceCameraId > 0)
@@ -672,6 +672,12 @@ void YtyServer::HandleRead(Ptr<Socket> socket)
                         session.actualBitrate = new_actual_bitrate;
 
                         session.logIntervalSumActualBitrateBps += session.actualBitrate;
+                        // 累加 CRF 和 FrameRate
+                        session.logIntervalSumCrf += session.crf;
+                        session.logIntervalSumFrameRate += session.frameRate; // 注意这里用的是当前协商的 frameRate
+                        
+                        // 将分辨率插入集合（std::set 会自动处理去重）
+                        session.logIntervalResolutions.insert(session.resolution);
 
                         int width = 0, height = 0;
                         size_t x_pos = session.resolution.find('x');
@@ -1178,13 +1184,34 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
 
     double avgActualBitrateKbps = 0.0;
     double avgVmaf = 0.0;
+    double avgCrf = 0.0;
+    double avgEncodingFps = 0.0;
+    std::string resolutionStr = "";
+
     if (session.logIntervalParamUpdateCount > 0) {
         avgActualBitrateKbps = (session.logIntervalSumActualBitrateBps / session.logIntervalParamUpdateCount) / 1000.0;
         avgVmaf = session.logIntervalSumVmaf / session.logIntervalParamUpdateCount;
+
+        // 计算平均 CRF
+        avgCrf = session.logIntervalSumCrf / session.logIntervalParamUpdateCount;
+        // 计算平均 Encoding FPS
+        avgEncodingFps = session.logIntervalSumFrameRate / session.logIntervalParamUpdateCount;
+
+        // 拼接分辨率字符串 (例如: "854x480,1280x720")
+        for (auto it = session.logIntervalResolutions.begin(); it != session.logIntervalResolutions.end(); ++it) {
+            if (it != session.logIntervalResolutions.begin()) {
+                resolutionStr += ",";
+            }
+            resolutionStr += *it;
+        }
     }
     else 
     {
         avgVmaf = session.lastVMAF;
+        avgCrf = static_cast<double>(session.crf);
+        avgEncodingFps = static_cast<double>(session.frameRate);
+        resolutionStr = session.resolution;
+
     }
     
     
@@ -1300,7 +1327,10 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
                   << session.clientInfo.codec << "\t"
                   << avgAiBandwidthKbps << "\t"
                   << avgActualBitrateKbps << "\t"
-                  << avgVmaf << '\n';
+                  << avgVmaf << "\t"
+                  << avgCrf << "\t"
+                  << resolutionStr << "\t"
+                  << avgEncodingFps << '\n';
     }
     
     // --- 5. 为下一个日志周期重置所有相关的统计量 (保持不变) ---
@@ -1316,6 +1346,9 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     session.logIntervalSumActualBitrateBps = 0.0;
     session.logIntervalSumVmaf = 0.0;
     session.logIntervalParamUpdateCount = 0;
+    session.logIntervalSumCrf = 0.0;
+    session.logIntervalSumFrameRate = 0.0;
+    session.logIntervalResolutions.clear();
 
     // 安排下一次日志事件
     ScheduleLog(clientAddress);
