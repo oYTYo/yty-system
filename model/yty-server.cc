@@ -152,7 +152,7 @@ NS_OBJECT_ENSURE_REGISTERED(YtyServer);
 
 // 码率的绝对上限和下限，防止码率无限增长或低到无意义
 const double MAX_BITRATE_MBPS = 25.0; // 码率最高不超过 10 Mbps
-const double MIN_BITRATE_KBPS = 200.0; // 码率最低不低于 100 Kbps
+const double MIN_BITRATE_KBPS = 300.0; // 码率最低不低于 100 Kbps  // 2025.11.26: 如果陷入保底码率难以恢复，修改这个值或许有用。
 
 // 单位换算常量
 const double BPS_IN_KBPS = 1000.0; // 1 Kbps = 1000 bps
@@ -248,6 +248,26 @@ GCCResult GCCController::get_target_bitrate_kbps(double throughputKbps, double d
     // 返回这个包含所有结果的结构体
     return result;
 }
+
+
+// 实现强制重置逻辑
+void GCCController::ResetState(double bitrate_kbps) {
+    // 强制将当前估算码率设置为传入的值（探测码率）
+    current_bitrate_bps_ = bitrate_kbps * BPS_IN_KBPS;
+    
+    // 关键：同时更新 last_acked，让算法认为当前吞吐量就是这么低
+    last_acked_bitrate_bps_ = current_bitrate_bps_;
+    
+    // 重置状态为 Normal，清除过载标记
+    state_ = NetworkState::Normal;
+    
+    // 重置最后增加时间，允许算法立即开始重新评估
+    time_of_last_bitrate_increase_ms_ = -1;
+    
+    // 重置过载阈值，给它一个较宽松的开始
+    overuse_threshold_ms_ = OVERUSE_THRESHOLD_MS_INITIAL;
+}
+
 
 std::string GCCController::get_state_string() const {
     switch (state_) {
@@ -905,6 +925,9 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
         // 1. 定义一个极低的“探测码率”。
         //    这个值（200kbps）低于H.264数据库中的最低码率（187kbps）,这将强制摄像头的CodecSimulator通过其降级逻辑，选择一个绝对可行的最低配置来恢复视频流。
         uint32_t probingBitrateBps = 200000; // 150 kbps
+
+        // 关键一步：告诉 GCC 现在的码率已经是 200kbps 了，别再做梦了
+        session.gccController->ResetState(probingBitrateBps / 1000.0);
 
         // 2. 直接打包并发送这个探测码率，主动引导摄像头恢复。
         Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&probingBitrateBps), sizeof(uint32_t));

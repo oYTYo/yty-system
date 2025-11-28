@@ -64,6 +64,7 @@ public:
     GCCResult get_target_bitrate_kbps(double throughputKbps, double delayMs, double lossRate, double rttMs, long long currentTimeMs, double minervaWeight);
     
     // --- 辅助函数 ---
+    void ResetState(double bitrate_kbps);
     std::string get_state_string() const;
 
 private:
