@@ -356,6 +356,10 @@ TypeId YtyServer::GetTypeId(void)
                       BooleanValue(false), // 默认关闭 Minerva
                       MakeBooleanAccessor(&YtyServer::m_useMinerva),
                       MakeBooleanChecker())
+        .AddAttribute("UseUniQ", "Enable UniQ algorithm via ZMQ.",
+                      BooleanValue(false),
+                      MakeBooleanAccessor(&YtyServer::m_useUniQ),
+                      MakeBooleanChecker())
         .AddAttribute("TraceCameraId", "Camera ID to trace for congestion control debugging. (0 = disabled)",
                       UintegerValue(0),
                       MakeUintegerAccessor(&YtyServer::m_traceCameraId),
@@ -457,7 +461,7 @@ void YtyServer::SetTotalBandwidth(DataRate totalBandwidth)
 void YtyServer::StartApplication(void)
 {
     // 在启动时重新检查并初始化ZMQ上下文
-    if (m_useAI && !m_zmq_context) {
+    if ((m_useAI || m_useUniQ) && !m_zmq_context) {
         m_zmq_context = std::make_unique<zmq::context_t>(1);
         NS_LOG_INFO("开启了AI通信");
     } else {
@@ -1300,6 +1304,20 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         session.lastAiStateJson = currentStateJson;
         session.lastAiActionWeight = session.aiControlledWeight;
     }
+    else if (m_useUniQ)
+    {
+        // 调用我们刚才写的函数
+        double weight = GetWeightFromUniQ(session, 
+                                          throughputKbps, 
+                                          avgDelayMs, 
+                                          avgLossRate, 
+                                          clientAddress);
+        
+        // UniQ 的权重直接作为 aiControlledWeight
+        // 这个权重之后会传入 GCCController::get_target_bitrate_kbps 
+        // 作用于乘性减 (update_bitrate 函数中)
+        session.aiControlledWeight = weight;
+    }
     else if (m_useMinerva)
     {
         // --- Minerva 启发式决策流程 (恢复您原有的逻辑) ---
@@ -1494,6 +1512,78 @@ uint32_t YtyServer::GetBitrateFromAI(ClientSession& session, double throughputKb
         return session.lastAiBitrateDecisionBps;
     }
 }
+
+
+// 实现 GetWeightFromUniQ
+double YtyServer::GetWeightFromUniQ(ClientSession& session, double throughputKbps, double avgDelayMs, double avgLossRate, const Address& from)
+{
+    // 1. 初始化 Socket (复用现有逻辑)
+    if (m_zmq_sockets.find(from) == m_zmq_sockets.end()) {
+        NS_LOG_INFO("Creating new ZMQ REQ socket for UniQ client " << session.clientInfo.cameraId);
+        m_zmq_sockets[from] = std::make_unique<zmq::socket_t>(*m_zmq_context, ZMQ_REQ);
+        m_zmq_sockets[from]->connect("tcp://localhost:5556");
+    }
+
+    auto& socket = m_zmq_sockets[from];
+
+    // 2. 构建 UniQ 专属 JSON
+    // 需要: AvgActualBitrate, Pixels(Resolution), Encoding_fps, AvgCRF, Throughput, AvgDelay, AvgLossRate, Codec
+    json request_json;
+    request_json["cameraId"] = session.clientInfo.cameraId;
+    
+    // 使用 session 中统计的 1s 平均值（如果存在），否则使用当前瞬时值
+    // 注意：在 LogPlaybackStats 调用此函数前，这些 Avg 值已经被计算好了
+    
+    // 实际上报码率
+    double actualBitrateKbps = (session.logIntervalParamUpdateCount > 0) 
+                               ? (session.logIntervalSumActualBitrateBps / session.logIntervalParamUpdateCount) / 1000.0 
+                               : (session.actualBitrate / 1000.0);
+    
+    // 平均 FPS
+    double avgFps = (session.logIntervalParamUpdateCount > 0)
+                    ? (session.logIntervalSumFrameRate / session.logIntervalParamUpdateCount)
+                    : (double)session.frameRate;
+
+    // 平均 CRF
+    double avgCrf = (session.logIntervalParamUpdateCount > 0)
+                    ? (session.logIntervalSumCrf / session.logIntervalParamUpdateCount)
+                    : (double)session.crf;
+
+    request_json["AvgActualBitrate(kbps)"] = actualBitrateKbps;
+    request_json["Resolution"] = session.resolution; // 字符串，Python端处理 Pixels
+    request_json["Encoding_fps"] = avgFps;
+    request_json["AvgCRF"] = avgCrf;
+    request_json["Throughput(kbps)"] = throughputKbps;
+    request_json["AvgDelay(ms)"] = avgDelayMs;
+    request_json["AvgLossRate"] = avgLossRate;
+    request_json["Codec"] = session.clientInfo.codec;
+
+    std::string request_str = request_json.dump();
+
+    // 3. 发送与接收
+    // NS_LOG_INFO("To UniQ -> " << request_str); // 调试可开启
+    socket->send(zmq::buffer(request_str), zmq::send_flags::none);
+
+    zmq::message_t reply;
+    // 使用阻塞接收，或者设置超时
+    auto res = socket->recv(reply, zmq::recv_flags::none);
+
+    if (res) {
+        std::string reply_str = reply.to_string();
+        try {
+            json reply_json = json::parse(reply_str);
+            double weight = reply_json["targetWeight"];
+            return weight;
+        } catch (const std::exception& e) {
+            NS_LOG_ERROR("UniQ JSON Parse Error: " << e.what());
+            return 1.0;
+        }
+    } else {
+        NS_LOG_WARN("UniQ No Reply");
+        return 1.0;
+    }
+}
+
 
 
 

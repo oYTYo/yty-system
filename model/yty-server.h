@@ -137,6 +137,9 @@ private:
     // Minerva 开关
     bool m_useMinerva; // Minerva 机制的开关
 
+    // UniQ 开关
+    bool m_useUniQ;
+
     // zmq通信
     bool m_useAI; // AI模式的开关
     std::unique_ptr<zmq::context_t> m_zmq_context; // ZMQ的全局上下文
@@ -316,6 +319,10 @@ private:
     // VMAF查询表的私有成员, 使用嵌套 map 来存储 VMAF LUT
     std::map<std::string, std::map<std::pair<int, int>, std::map<int, double>>> m_vmafLut;
     void InitializeVmafLut(); // 用于初始化VMAF查询表的函数
+
+    // 声明 UniQ 通信函数
+    // 专门用于和 UniQ Python Server 通信
+    double GetWeightFromUniQ(ClientSession& session, double throughputKbps, double avgDelayMs, double avgLossRate, const Address& from);
     
 };
 
