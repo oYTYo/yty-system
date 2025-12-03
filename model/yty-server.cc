@@ -250,23 +250,23 @@ GCCResult GCCController::get_target_bitrate_kbps(double throughputKbps, double d
 }
 
 
-// 实现强制重置逻辑
-void GCCController::ResetState(double bitrate_kbps) {
-    // 强制将当前估算码率设置为传入的值（探测码率）
-    current_bitrate_bps_ = bitrate_kbps * BPS_IN_KBPS;
+// // 实现强制重置GCC吞吐量逻辑
+// void GCCController::ResetState(double bitrate_kbps) {
+//     // 强制将当前估算码率设置为传入的值（探测码率）
+//     current_bitrate_bps_ = bitrate_kbps * BPS_IN_KBPS;
     
-    // 关键：同时更新 last_acked，让算法认为当前吞吐量就是这么低
-    last_acked_bitrate_bps_ = current_bitrate_bps_;
+//     // 关键：同时更新 last_acked，让算法认为当前吞吐量就是这么低
+//     last_acked_bitrate_bps_ = current_bitrate_bps_;
     
-    // 重置状态为 Normal，清除过载标记
-    state_ = NetworkState::Normal;
+//     // 重置状态为 Normal，清除过载标记
+//     state_ = NetworkState::Normal;
     
-    // 重置最后增加时间，允许算法立即开始重新评估
-    time_of_last_bitrate_increase_ms_ = -1;
+//     // 重置最后增加时间，允许算法立即开始重新评估
+//     time_of_last_bitrate_increase_ms_ = -1;
     
-    // 重置过载阈值，给它一个较宽松的开始
-    overuse_threshold_ms_ = OVERUSE_THRESHOLD_MS_INITIAL;
-}
+//     // 重置过载阈值，给它一个较宽松的开始
+//     overuse_threshold_ms_ = OVERUSE_THRESHOLD_MS_INITIAL;
+// }
 
 
 std::string GCCController::get_state_string() const {
@@ -930,8 +930,8 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
         //    这个值（200kbps）低于H.264数据库中的最低码率（187kbps）,这将强制摄像头的CodecSimulator通过其降级逻辑，选择一个绝对可行的最低配置来恢复视频流。
         uint32_t probingBitrateBps = 200000; // 150 kbps
 
-        // 关键一步：告诉 GCC 现在的码率已经是 200kbps 了，别再做梦了
-        session.gccController->ResetState(probingBitrateBps / 1000.0);
+        // // 关键一步：告诉 GCC 现在的码率已经是 200kbps 了，别再做梦了
+        // session.gccController->ResetState(probingBitrateBps / 1000.0);
 
         // 2. 直接打包并发送这个探测码率，主动引导摄像头恢复。
         Ptr<Packet> rtcpPacket = Create<Packet>(reinterpret_cast<const uint8_t*>(&probingBitrateBps), sizeof(uint32_t));
@@ -970,13 +970,15 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     if (lossRate < 0) lossRate = 0.0;
     
     Time avgDelay = (session.intervalReceivedPackets > 0) ? session.intervalTotalDelay / session.intervalReceivedPackets : Seconds(0);
-    // (*** 注意 ***: bandwidthToReportKbps 是您用于GCC的吞吐量，而不是 session.lastThroughputKbpsForAI)
-    // (我在这里使用 session.lastThroughputKbpsForAI，因为它在 LogPlaybackStats 中被更新)
-    // (您在 simple_network.cc 中更新了吞吐量计算，这很好，我们用那个)
+
+    // (*** 注意 ***: 这里可以选择用1s均值还是50ms的瞬时值)
     double bandwidthToReportKbps = session.lastThroughputKbpsForAI; // (从1s循环更新)
-    if (session.intervalReceivedPackets > 0) { // (用50ms的瞬时值覆盖，如果存在)
-         bandwidthToReportKbps = (session.intervalReceivedBytes * 8.0) / interval.GetSeconds() / 1000.0;
-    }
+
+    // 用50ms的瞬时值来更新给GCC的吞吐量
+    // if (session.intervalReceivedPackets > 0) { // (用50ms的瞬时值覆盖，如果存在)
+    //      bandwidthToReportKbps = (session.intervalReceivedBytes * 8.0) / interval.GetSeconds() / 1000.0;
+    // }
+
 
     uint32_t targetBitrateBps;
     std::string loss_decision = "N/A";  // 初始化为"N/A"，适用于AI模式

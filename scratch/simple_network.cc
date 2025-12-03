@@ -76,13 +76,81 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
     double currentTime = Simulator::Now().GetSeconds();
 
     // 根据总仿真时间动态计算各阶段的结束时间点
-    const double segment = (simulationTime - 60.0)  / 5.0;
+    // const double segment = (simulationTime - 60.0)  / 5.0;
+
+    const double segment = (simulationTime - 60.0)  / 15.0;
+
+
 
     // 2. 根据时间确定动态缩放比例
     double dynamic_multiplier ; 
 
-
     dynamic_multiplier = baseMultiplier;
+
+
+
+    // if (currentTime >= 0.0 && currentTime < 60.0 + segment)
+    // {
+    //     dynamic_multiplier = baseMultiplier - 0.5;
+    // }
+    // else if (currentTime >= 60.0 + segment && currentTime < 60.0 + segment * 2)
+    // {
+    //     dynamic_multiplier = baseMultiplier;
+    // }
+    // else if (currentTime >= 60.0 + segment * 2 && currentTime < 60.0 + segment * 3)
+    // {
+    //     dynamic_multiplier = baseMultiplier;
+    // }
+    // else if (currentTime >= 60.0 + segment * 3 && currentTime < 60.0 + segment * 4)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 0.5;
+    // }
+    // else if (currentTime >= 60.0 + segment * 4 && currentTime < 60.0 + segment * 5)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 1.0;
+    // }
+    // else if (currentTime >= 60.0 + segment * 5 && currentTime < 60.0 + segment * 6)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 1.5;
+    // }
+    // else if (currentTime >= 60.0 + segment * 6 && currentTime < 60.0 + segment * 7)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 2.0;
+    // }
+    // else if (currentTime >= 60.0 + segment * 7 && currentTime < 60.0 + segment * 8)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 2.5;
+    // }
+    // else if (currentTime >= 60.0 + segment * 8 && currentTime < 60.0 + segment * 9)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 2.0;
+    // }
+    // else if (currentTime >= 60.0 + segment * 9 && currentTime < 60.0 + segment * 10)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 1.5;
+    // }
+    // else if (currentTime >= 60.0 + segment * 10 && currentTime < 60.0 + segment * 11)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 1.0;
+    // }
+    // else if (currentTime >= 60.0 + segment * 11 && currentTime < 60.0 + segment * 12)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 0.5;
+    // }
+    // else if (currentTime >= 60.0 + segment * 12 && currentTime < 60.0 + segment * 13)
+    // {
+    //     dynamic_multiplier = baseMultiplier;
+    // }
+    // else if (currentTime >= 60.0 + segment * 13 && currentTime < 60.0 + segment * 14)
+    // {
+    //     dynamic_multiplier = baseMultiplier;
+    // }
+    // else
+    // {
+    //     dynamic_multiplier = baseMultiplier - 0.5;
+    // }
+
+
     
     // if (currentTime >= 0.0 && currentTime < 60.0 + segment)
     // {
@@ -90,19 +158,42 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
     // }
     // else if (currentTime >= 60.0 + segment && currentTime < 60.0 + segment * 2)
     // {
-    //     dynamic_multiplier = baseMultiplier + 0.5;
+    //     dynamic_multiplier = baseMultiplier;
     // }
     // else if (currentTime >= 60.0 + segment * 2 && currentTime < 60.0 + segment * 3)
     // {
-    //     dynamic_multiplier = baseMultiplier + 1.5;
+    //     dynamic_multiplier = baseMultiplier + 0.5;
     // }
     // else if (currentTime >= 60.0 + segment * 3 && currentTime < 60.0 + segment * 4)
     // {
-    //     dynamic_multiplier = baseMultiplier + 2.0;
+    //     dynamic_multiplier = baseMultiplier + 1.5;
     // }
     // else
     // {
     //     dynamic_multiplier = baseMultiplier + 2.5;
+    // }
+
+
+
+    // if (currentTime >= 0.0 && currentTime < 60.0 + segment)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 2.5;
+    // }
+    // else if (currentTime >= 60.0 + segment && currentTime < 60.0 + segment * 2)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 1.5;
+    // }
+    // else if (currentTime >= 60.0 + segment * 2 && currentTime < 60.0 + segment * 3)
+    // {
+    //     dynamic_multiplier = baseMultiplier + 0.5;
+    // }
+    // else if (currentTime >= 60.0 + segment * 3 && currentTime < 60.0 + segment * 4)
+    // {
+    //     dynamic_multiplier = baseMultiplier;
+    // }
+    // else
+    // {
+    //     dynamic_multiplier = baseMultiplier - 0.5;
     // }
     
 
@@ -134,14 +225,16 @@ int main(int argc, char* argv[])
     uint32_t startLine = 1;
 
     // --- [功能保留] AI 和 Minerva 模式开关 ---
-    bool useAI = true;
+    bool useAI = false;
     bool useMinerva = false;
     bool useOracle = false;
+    bool useUniQ = true;
     // 定义一个变量来接收要追踪的摄像头ID
-    uint32_t traceCameraId = 10; 
+    uint32_t traceCameraId = 1; 
     CommandLine cmd;
     cmd.AddValue("useAI", "Enable AI-based congestion control", useAI);
     cmd.AddValue("useMinerva", "Enable Minerva-like QoE-based rate adjustment", useMinerva);
+    cmd.AddValue("useUniQ", "Enable UniQ algorithm via ZMQ", useUniQ);
     cmd.AddValue("traceCameraId", "ID of the camera to trace for congestion control log", traceCameraId);
     cmd.AddValue("time", "Total simulation time in seconds", simulationTime);
     cmd.AddValue("base", "Base multiplier for dynamic bandwidth", baseMultiplier);
@@ -230,6 +323,7 @@ int main(int argc, char* argv[])
     serverHelper.SetAttribute("UseAI", BooleanValue(useAI));
     serverHelper.SetAttribute("UseMinerva", BooleanValue(useMinerva));
     serverHelper.SetAttribute("UseOracle", BooleanValue(useOracle));
+    serverHelper.SetAttribute("UseUniQ", BooleanValue(useUniQ));
     serverHelper.SetAttribute("TraceCameraId", UintegerValue(traceCameraId));
 
     ApplicationContainer serverApps = serverHelper.Install(serverNode.Get(0));
