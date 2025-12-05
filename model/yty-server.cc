@@ -217,6 +217,8 @@ std::string GCCController::delay_based_control(double delay_ms, long long curren
     double K_d = 0.039;
     double update_rate = (std::abs(delay_variation_ms) > overuse_threshold_ms_) ? K_u : K_d;
     overuse_threshold_ms_ += (std::abs(delay_variation_ms) - overuse_threshold_ms_) * update_rate;
+
+    // 这里操作时延敏感度，默认是6
     overuse_threshold_ms_ = std::max(6.0, std::min(overuse_threshold_ms_, 600.0));
 
     if (state_ == NetworkState::Overuse) return "decrease";
@@ -285,6 +287,7 @@ void GCCController::update_bitrate(const std::string& loss_decision, const std::
 
     if (loss_decision == "decrease" || delay_decision == "decrease") {
 
+        // 这个0.85是默认是乘性减幅度
         double decreaseFactor = 1.0 - ((1.0 - 0.85) / clampedWeight);  // 一个动态衰减因子，当w等于1的时候不改变衰减幅度，w大于1衰减变少，w小于1衰减变多。Minerva只修改了乘性减的幅度
 
         current_bitrate_bps_ = std::min(
@@ -302,7 +305,7 @@ void GCCController::update_bitrate(const std::string& loss_decision, const std::
                                         0.02; 
 
             double response_time_ms = 100.0 + rtt_ms;
-            // 还原为 gcc_server.cpp 中的值：0.5
+            // 还原为 gcc_server.cpp 中的值：0.5，这个alpha是加性增的幅度
             double alpha = 0.5 * time_delta_seconds; 
             // 还原为 gcc_server.cpp 中的值：50000.0
             double additive_increase_bps = std::max(50000.0, alpha * (AVERAGE_PACKET_SIZE_BYTES * 8000.0) / response_time_ms);
@@ -1349,7 +1352,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     else
     {
         // --- 纯 GCC 决策流程 ---
-        session.aiControlledWeight = 1.0; // 权重为1
+        session.aiControlledWeight = 1.05; // 权重为1
     }
     
     // --- 4. 日志记录 (保持不变) ---
