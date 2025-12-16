@@ -1325,7 +1325,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     }
     else if (m_useMinerva)
     {
-        // --- Minerva 启发式决策流程 (恢复您原有的逻辑) ---
+        // --- Minerva 启发式决策流程 (基于绝对的QoE公平) ---
         double referenceBitrateMbps = interpolate_qoe_to_bitrate_mbps(
             session.qoeValue, 
             g_minerva_qoe_data,     
@@ -1343,16 +1343,69 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
             session.minervaWeight = 1.0; 
         }
 
-        const double alpha = 0.1;
+        const double alpha = 0.05;
         session.smoothedMinervaWeight = alpha * session.minervaWeight + (1.0 - alpha) * session.smoothedMinervaWeight;
         
         // 应用Minerva的决策
         session.aiControlledWeight = session.smoothedMinervaWeight;
+
+
+        // === [修改] 模式切换：实现群体 QoE 总和最大化 (Max Sum Utility) ===
+        // 理论公式: w = r * U'(r)
+        // 含义: 权重 = 当前带宽 * 边际效用(斜率)
+
+        // // 1. 获取当前实际码率 (转化为 Mbps 以匹配查找表)
+        // double currentBitrateMbps = (session.logIntervalParamUpdateCount > 0) ? 
+        //                             (avgActualBitrateKbps / 1000.0) : 
+        //                             (session.actualBitrate / 1000.0);
+
+        // // 2. 计算局部斜率 (Marginal Utility)
+        // // 利用已有的 g_minerva_bitrate_data_mbps (X轴) 和 g_minerva_qoe_data (Y轴)
+        // double slope = 0.0;
+        
+        // // 找到当前码率在表中的位置
+        // auto it = std::lower_bound(g_minerva_bitrate_data_mbps.begin(), g_minerva_bitrate_data_mbps.end(), currentBitrateMbps);
+        // size_t idx = std::distance(g_minerva_bitrate_data_mbps.begin(), it);
+
+        // // 边界处理与差分计算
+        // if (idx > 0 && idx < g_minerva_bitrate_data_mbps.size()) {
+        //     double dQoE = g_minerva_qoe_data[idx] - g_minerva_qoe_data[idx - 1];
+        //     double dBitrate = g_minerva_bitrate_data_mbps[idx] - g_minerva_bitrate_data_mbps[idx - 1];
+        //     if (dBitrate > 1e-6) slope = dQoE / dBitrate; // 斜率 = QoE提升 / Mbps
+        // } 
+        // else if (idx == 0) {
+        //     // 如果码率极低，使用第一段的斜率
+        //     double dQoE = g_minerva_qoe_data[1] - g_minerva_qoe_data[0];
+        //     double dBitrate = g_minerva_bitrate_data_mbps[1] - g_minerva_bitrate_data_mbps[0];
+        //     slope = dQoE / dBitrate;
+        // }
+        // // 如果 idx == size，说明码率已超表，通常处于饱和区，斜率接近0，保持 slope=0 即可
+
+        // // 3. 计算原始权重 (r * Slope)
+        // // 注意：Slope 的单位是 QoE/Mbps。
+        // // 低码率时斜率通常很高（例如 30），高码率时接近 0。
+        // // 为了防止权重过大（超过2.0会被截断），建议加一个归一化系数。
+        // // 假设我们希望平均权重维持在 1.0 左右，根据经验数据，建议除以 15.0 左右。
+        // double rawWeight = currentBitrateMbps * slope; 
+
+        // // 如果直接用斜率
+        // // double rawWeight = slope; 
+
+        // double scalingFactor = 1.0 / 20.0; // 经验归一化系数，可根据日志微调
+
+        // session.minervaWeight = rawWeight * scalingFactor;
+
+        // // 4. 平滑处理 (保持原样，防止权重跳变过快)
+        // const double alpha = 0.1;
+        // session.smoothedMinervaWeight = alpha * session.minervaWeight + (1.0 - alpha) * session.smoothedMinervaWeight;
+        
+        // // 应用决策
+        // session.aiControlledWeight = session.smoothedMinervaWeight;
     }
     else
     {
         // --- 纯 GCC 决策流程 ---
-        session.aiControlledWeight = 1.05; // 权重为1
+        session.aiControlledWeight = 1.0; // 权重为1
     }
     
     // --- 4. 日志记录 (保持不变) ---
