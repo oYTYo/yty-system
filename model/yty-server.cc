@@ -56,6 +56,7 @@ static const std::vector<double> g_minerva_bitrate_data_mbps = {
     6.845560909090909
 };
 
+
 /**
  * @brief 线性插值函数，等同于 numpy.interp(target_y, y_vec, x_vec)
  * @param target_y 目标 QoE (y 轴)
@@ -363,6 +364,11 @@ TypeId YtyServer::GetTypeId(void)
                       BooleanValue(false),
                       MakeBooleanAccessor(&YtyServer::m_useUniQ),
                       MakeBooleanChecker())
+        .AddAttribute("AlgoCameraIdLimit", 
+                      "The max Camera ID that allows AI/Minerva/UniQ algorithms. Cameras with ID > this value will use default GCC (weight=1.0). Default is infinity.",
+                      UintegerValue(UINT32_MAX), // 默认为最大整数，保证不传参时所有摄像头都生效
+                      MakeUintegerAccessor(&YtyServer::m_algoCameraIdLimit),
+                      MakeUintegerChecker<uint32_t>())
         .AddAttribute("TraceCameraId", "Camera ID to trace for congestion control debugging. (0 = disabled)",
                       UintegerValue(0),
                       MakeUintegerAccessor(&YtyServer::m_traceCameraId),
@@ -373,6 +379,9 @@ TypeId YtyServer::GetTypeId(void)
 
 YtyServer::YtyServer() : m_useOracle(false), m_useMinerva(false), m_useAI(false), m_socket(0), m_port(9), m_totalOracleBandwidth(DataRate("0bps")), m_totalCodecWeight(0.0)
 {
+
+    m_algoCameraIdLimit = UINT32_MAX;
+
     // 如果启用了AI模式，则初始化ZMQ上下文
     if (m_useAI) {
         m_zmq_context = std::make_unique<zmq::context_t>(1);
@@ -1265,8 +1274,13 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     );
     session.metricSamples.clear(); // 清空样本
 
+    // 判断当前摄像头ID是否在允许使用算法的范围内
+    // 如果 m_algoCameraIdLimit 是默认值(最大值)，这里永远为 true
+    bool allowAlgo = (session.clientInfo.cameraId <= m_algoCameraIdLimit);
+
+
     // --- 3. 运行1秒战略决策 (AI, Minerva, 或 GCC) ---
-    if (m_useAI)
+    if (m_useAI && allowAlgo)
     {
         // --- AI (RL) 决策流程 ---
         if (m_zmq_sockets.find(clientAddress) == m_zmq_sockets.end()) {
@@ -1309,7 +1323,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         session.lastAiStateJson = currentStateJson;
         session.lastAiActionWeight = session.aiControlledWeight;
     }
-    else if (m_useUniQ)
+    else if (m_useUniQ && allowAlgo)
     {
         // 调用我们刚才写的函数
         double weight = GetWeightFromUniQ(session, 
@@ -1323,7 +1337,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         // 作用于乘性减 (update_bitrate 函数中)
         session.aiControlledWeight = weight;
     }
-    else if (m_useMinerva)
+    else if (m_useMinerva && allowAlgo)
     {
         // --- Minerva 启发式决策流程 (基于绝对的QoE公平) ---
         double referenceBitrateMbps = interpolate_qoe_to_bitrate_mbps(
@@ -1342,6 +1356,33 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
         {
             session.minervaWeight = 1.0; 
         }
+
+
+        // // Minerva新权重调整：针对 H.264 减少权重
+        // if (session.clientInfo.codec == "H.264")
+        // {
+        //     session.minervaWeight -= 0.3;
+            
+        //     // 安全检查：防止权重变为负数或过小，建议设置一个下限（例如 0.1）
+        //     if (session.minervaWeight < 0.5) 
+        //     {
+        //         session.minervaWeight = 0.5;
+        //     }
+        // }
+
+        // // Minerva新权重调整：针对 VP9 减少权重
+        // if (session.clientInfo.codec == "VP9")
+        // {
+        //     session.minervaWeight -= 0.5;
+            
+        //     // 安全检查：防止权重变为负数或过小，建议设置一个下限（例如 0.1）
+        //     if (session.minervaWeight < 0.5) 
+        //     {
+        //         session.minervaWeight = 0.5;
+        //     }
+        // }
+
+
 
         const double alpha = 0.05;
         session.smoothedMinervaWeight = alpha * session.minervaWeight + (1.0 - alpha) * session.smoothedMinervaWeight;
@@ -1405,6 +1446,7 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     else
     {
         // --- 纯 GCC 决策流程 ---
+        // 如果 allowAlgo 为 false (即 CameraId > x)，也会进入这里
         session.aiControlledWeight = 1.0; // 权重为1
     }
     
