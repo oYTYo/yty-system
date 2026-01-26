@@ -65,7 +65,8 @@ TypeId YtyCamera::GetTypeId(void)
         .AddAttribute("RemoteAddress", "The destination address of the outbound packets", AddressValue(), MakeAddressAccessor(&YtyCamera::m_peerAddress), MakeAddressChecker())
         .AddAttribute("RemotePort", "The destination port of the outbound packets", UintegerValue(9), MakeUintegerAccessor(&YtyCamera::m_peerPort), MakeUintegerChecker<uint16_t>())
         .AddAttribute("CameraId", "此摄像头的唯一ID.", UintegerValue(0), MakeUintegerAccessor(&YtyCamera::m_cameraId), MakeUintegerChecker<uint32_t>())
-        .AddAttribute("Codec", "The video codec (e.g., H.264, H.265).", StringValue("H.264"), MakeStringAccessor(&YtyCamera::m_codec), MakeStringChecker()); // <<< 【新增】Codec属性
+        .AddAttribute("Codec", "The video codec (e.g., H.264, H.265).", StringValue("H.264"), MakeStringAccessor(&YtyCamera::m_codec), MakeStringChecker())
+        .AddAttribute("MaxAppBitrate", "The maximum bitrate the application is allowed to generate.", DataRateValue(DataRate("0bps")), MakeDataRateAccessor(&YtyCamera::m_maxAppBitrate), MakeDataRateChecker());
     return tid;
 }
 
@@ -88,7 +89,8 @@ YtyCamera::YtyCamera()
       m_decreaseResPressure(0),
       m_pressureThreshold(100), // 设定一个阈值，例如100
       m_pressureRecoveryRate(10), // 设定一个恢复速率，例如每次降低10
-      m_initialParamsNegotiated(false)
+      m_initialParamsNegotiated(false),
+      m_maxAppBitrate(0)
 
 {
     NS_LOG_FUNCTION(this);
@@ -306,7 +308,17 @@ void YtyCamera::SendEncodingParams()
 
 void YtyCamera::UpdateEncodingParameters(uint32_t bandwidthBps)
 {
-    double target_kbps = bandwidthBps / 1000.0;
+    
+    // 如果设置了 MaxAppBitrate 且当前可用带宽超过了限制，则强制钳位
+    uint32_t effectiveBandwidthBps = bandwidthBps;
+    if (m_maxAppBitrate.GetBitRate() > 0 && effectiveBandwidthBps > m_maxAppBitrate.GetBitRate()) {
+        effectiveBandwidthBps = m_maxAppBitrate.GetBitRate();
+        // NS_LOG_INFO("Camera " << m_cameraId << " bandwidth limited by MaxAppBitrate to " << effectiveBandwidthBps);
+    }
+
+    // 将原有的 bandwidthBps 替换为 effectiveBandwidthBps
+    double target_kbps = effectiveBandwidthBps / 1000.0;
+
     int switch_res_direction = 0; // 0=不切换, 1=升, -1=降
 
     // 1. 更新决策压力值

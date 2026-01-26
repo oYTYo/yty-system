@@ -146,6 +146,9 @@ private:
 
     bool m_initialParamsNegotiated;  // 用于标记是否已完成首次参数协商的标志
 
+    // 应用程序最大码率限制 (0 表示不限制)
+    DataRate m_maxAppBitrate;
+
 };
 
 } // namespace ns3
