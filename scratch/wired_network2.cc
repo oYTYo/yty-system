@@ -6,8 +6,8 @@
  * 拓扑结构被简化为二级星型拓扑: "摄像头 - 交换机 - 服务器"。
  *
  * 主要特点:
- * 1. 拓扑: 12个有线摄像头 -> 1个中心交换机 -> 1个服务器。
- * 2. 摄像头配置: 包含6个H.264编码的摄像头和3个H.265编码的摄像头。
+ * 1. 拓扑: 24个有线摄像头 -> 1个中心交换机 -> 1个服务器。
+ * 2. 摄像头配置: 默认 Mixed 模式下包含 H.264/H.265/VP9/AV1 四种编码，各6路（总计24路）。
  * 3. 动态带宽: 交换机到服务器之间的骨干链路带宽会根据 'scratch/bandwidth.txt' 文件中的配置动态变化，模拟网络波动。
  * 4. 功能保留: 保留了原有的 YtyCamera 和 YtyServer 应用逻辑，以及通过命令行开启 AI 或 Minerva 拥塞控制算法的选项。
  *
@@ -30,6 +30,7 @@
 #include <fstream>
 #include <vector>
 
+#include <limits>
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("SimpleWiredCameraNetwork");
@@ -151,8 +152,8 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
     // }
     
 
-    // [修改] 带宽计算因子调整，原先是为60个摄像头设计的，现在调整为12个
-    double new_kbps = bandwidths_kbps[index] * 12 * 1000 * dynamic_multiplier / 3.5;
+    // [修改] 带宽计算因子调整，原先是为60个摄像头设计的，现在调整为24个
+    double new_kbps = bandwidths_kbps[index] * 24 * 1000 * dynamic_multiplier / 3.5;
     DataRate newRate(std::to_string(new_kbps) + "Kbps");
 
     ChangeBandwidth(devices, newRate);
@@ -185,6 +186,8 @@ int main(int argc, char* argv[])
     bool useUniQ = false;
     // 定义一个变量来接收要追踪的摄像头ID
     uint32_t traceCameraId = 1; 
+    // 超过该 CameraId 后关闭带宽分配算法（变为纯 GCC）。默认 UINT32_MAX 表示全局开启。
+    uint32_t algoCameraIdLimit = std::numeric_limits<uint32_t>::max();
     // 目标Codec参数，默认为 Mixed
     std::string targetCodec = "Mixed";
 
@@ -193,6 +196,7 @@ int main(int argc, char* argv[])
     cmd.AddValue("useMinerva", "Enable Minerva-like QoE-based rate adjustment", useMinerva);
     cmd.AddValue("useUniQ", "Enable UniQ algorithm via ZMQ", useUniQ);
     cmd.AddValue("traceCameraId", "ID of the camera to trace for congestion control log", traceCameraId);
+    cmd.AddValue("algoCameraIdLimit", "Disable bandwidth allocation algorithm for cameras with CameraId > this limit (e.g., 24=all algo, 12=half, 0=all GCC)", algoCameraIdLimit);
     cmd.AddValue("targetCodec", "Force all cameras to use this codec (AV1, VP9, H.265, H.264, or Mixed)", targetCodec);
     cmd.AddValue("time", "Total simulation time in seconds", simulationTime);
     cmd.AddValue("base", "Base multiplier for dynamic bandwidth", baseMultiplier);
@@ -200,7 +204,7 @@ int main(int argc, char* argv[])
     cmd.Parse(argc, argv);
 
     // --- 仿真核心参数 ---
-    const uint32_t WIRED_CAM_TOTAL = 12; // 简化为12个有线摄像头
+    const uint32_t WIRED_CAM_TOTAL = 24; // 简化为24个有线摄像头
     const uint16_t serverPort = 9;
 
     // --- 1. 节点创建 ---
@@ -231,7 +235,7 @@ int main(int argc, char* argv[])
 
     // (3.2) 配置交换机到服务器的链路 (这将是我们的瓶颈链路)
     // 初始带宽可以设为一个基准值，后续会由动态调整函数覆盖
-    p2pSwitchToServer.SetDeviceAttribute("DataRate", StringValue("50Mbps"));
+    p2pSwitchToServer.SetDeviceAttribute("DataRate", StringValue("100Mbps"));
     p2pSwitchToServer.SetChannelAttribute("Delay", StringValue("5ms"));
     p2pSwitchToServer.SetQueue("ns3::DropTailQueue", "MaxSize", StringValue("150p"));
 
@@ -278,13 +282,14 @@ int main(int argc, char* argv[])
     // (4.1) 服务器应用
     LogComponentEnable("YtyServerApplication", LOG_LEVEL_INFO);
     YtyServerHelper serverHelper(serverPort);
-    serverHelper.SetAttribute("LogFile", StringValue("scratch/play_status_wired.txt"));
+    serverHelper.SetAttribute("LogFile", StringValue("scratch/play_status_wired2.txt"));
     serverHelper.SetAttribute("UseAI", BooleanValue(useAI));
     serverHelper.SetAttribute("UseMinerva", BooleanValue(useMinerva));
     serverHelper.SetAttribute("UseOracle", BooleanValue(useOracle));
     serverHelper.SetAttribute("UseUniQ", BooleanValue(useUniQ));
     serverHelper.SetAttribute("TraceCameraId", UintegerValue(traceCameraId));
 
+    serverHelper.SetAttribute("AlgoCameraIdLimit", UintegerValue(algoCameraIdLimit));
     ApplicationContainer serverApps = serverHelper.Install(serverNode.Get(0));
     serverApps.Start(Seconds(1.0));
     serverApps.Stop(Seconds(simulationTime - 1.0));

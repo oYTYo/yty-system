@@ -4,12 +4,12 @@
  * 网络描述:
  * 这是一个简化的摄像头监控网络仿真脚本 (LTE版)。
  * * 拓扑结构:
- * 12个 LTE 摄像头 (UE) -> 1个基站 (eNB) -> EPC (SGW/PGW) -> (有线P2P瓶颈链路) -> 1个服务器
+ * 24个 LTE 摄像头 (UE) -> 1个基站 (eNB) -> EPC (SGW/PGW) -> (有线P2P瓶颈链路) -> 1个服务器
  *
  * 主要特点:
  * 1. 物理层: LTE FDD, 20MHz 带宽 (100 RBs), 确保高吞吐量.
  * 2. 核心网: 使用 PointToPointEpcHelper 模拟完整的 EPC 流程.
- * 3. 摄像头配置: 包含6个H.264编码的摄像头和3个H.265编码的摄像头(混合模式).
+ * 2. 摄像头配置: 默认 Mixed 模式下包含 H.264/H.265/VP9/AV1 四种编码，各6路（总计24路）。
  * 4. 动态带宽: PGW (核心网网关) 到服务器之间的骨干链路带宽会根据文件动态变化.
  *
  */
@@ -31,6 +31,7 @@
 #include <fstream>
 #include <vector>
 
+#include <limits>
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("SimpleLteCameraNetwork");
@@ -63,8 +64,8 @@ void ScheduleNextBandwidthChange(NetDeviceContainer devices, const std::vector<d
     double currentTime = Simulator::Now().GetSeconds();
     double dynamic_multiplier = baseMultiplier;
 
-    // 计算新带宽 (针对12个摄像头调整)
-    double new_kbps = bandwidths_kbps[index] * 12 * 1000 * dynamic_multiplier / 3.5;
+    // 计算新带宽 (针对24个摄像头调整)
+    double new_kbps = bandwidths_kbps[index] * 24 * 1000 * dynamic_multiplier / 3.5;
     DataRate newRate(std::to_string(new_kbps) + "Kbps");
 
     ChangeBandwidth(devices, newRate);
@@ -93,6 +94,8 @@ int main(int argc, char* argv[])
     bool useOracle = false;
     bool useUniQ = false;
     uint32_t traceCameraId = 1; 
+    // 超过该 CameraId 后关闭带宽分配算法（变为纯 GCC）。默认 UINT32_MAX 表示全局开启。
+    uint32_t algoCameraIdLimit = std::numeric_limits<uint32_t>::max();
     std::string targetCodec = "Mixed";
 
     CommandLine cmd;
@@ -100,6 +103,7 @@ int main(int argc, char* argv[])
     cmd.AddValue("useMinerva", "Enable Minerva-like QoE-based rate adjustment", useMinerva);
     cmd.AddValue("useUniQ", "Enable UniQ algorithm via ZMQ", useUniQ);
     cmd.AddValue("traceCameraId", "ID of the camera to trace", traceCameraId);
+    cmd.AddValue("algoCameraIdLimit", "Disable bandwidth allocation algorithm for cameras with CameraId > this limit (e.g., 24=all algo, 12=half, 0=all GCC)", algoCameraIdLimit);
     cmd.AddValue("targetCodec", "Force codec (AV1, VP9, H.265, H.264, or Mixed)", targetCodec);
     cmd.AddValue("time", "Total simulation time", simulationTime);
     cmd.AddValue("base", "Base multiplier for dynamic bandwidth", baseMultiplier);
@@ -107,7 +111,7 @@ int main(int argc, char* argv[])
     cmd.Parse(argc, argv);
 
     // --- 仿真核心参数 ---
-    const uint32_t LTE_CAM_TOTAL = 12; // 12个UE摄像头
+    const uint32_t LTE_CAM_TOTAL = 24; // 24个UE摄像头
     const uint16_t serverPort = 9;
 
     // --- 1. LTE Helper 配置 ---
@@ -198,7 +202,7 @@ int main(int argc, char* argv[])
     NS_LOG_INFO("Configuring Backhaul Link (PGW -> Server)...");
 
     PointToPointHelper p2pBackhaul;
-    p2pBackhaul.SetDeviceAttribute("DataRate", StringValue("50Mbps")); // 初始带宽
+    p2pBackhaul.SetDeviceAttribute("DataRate", StringValue("100Mbps")); // 初始带宽
     p2pBackhaul.SetChannelAttribute("Delay", StringValue("5ms"));
     p2pBackhaul.SetQueue("ns3::DropTailQueue", "MaxSize", StringValue("150p"));
 
@@ -240,13 +244,14 @@ int main(int argc, char* argv[])
     // (8.1) 服务器应用
     LogComponentEnable("YtyServerApplication", LOG_LEVEL_INFO);
     YtyServerHelper serverHelper(serverPort);
-    serverHelper.SetAttribute("LogFile", StringValue("scratch/play_status_lte.txt"));
+    serverHelper.SetAttribute("LogFile", StringValue("scratch/play_status_lte2.txt"));
     serverHelper.SetAttribute("UseAI", BooleanValue(useAI));
     serverHelper.SetAttribute("UseMinerva", BooleanValue(useMinerva));
     serverHelper.SetAttribute("UseOracle", BooleanValue(useOracle));
     serverHelper.SetAttribute("UseUniQ", BooleanValue(useUniQ));
     serverHelper.SetAttribute("TraceCameraId", UintegerValue(traceCameraId));
 
+    serverHelper.SetAttribute("AlgoCameraIdLimit", UintegerValue(algoCameraIdLimit));
     ApplicationContainer serverApps = serverHelper.Install(serverNode.Get(0));
     serverApps.Start(Seconds(1.0));
     serverApps.Stop(Seconds(simulationTime - 1.0));
