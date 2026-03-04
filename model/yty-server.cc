@@ -836,10 +836,12 @@ void YtyServer::ProcessRtp(Ptr<Packet> packet, const Address& from)
 
 void YtyServer::ProcessRtsp(Ptr<Packet> packet, const Address& from)
 {
-    uint8_t buffer[100];
-    packet->CopyData(buffer, packet->GetSize());
-    buffer[std::min((uint32_t)99, packet->GetSize())] = '\0';
-    std::string request(reinterpret_cast<char*>(buffer));
+    // --- 修复 Stack Smashing 的安全读取逻辑 ---
+    uint32_t packetSize = packet->GetSize();
+    std::vector<char> buffer(packetSize + 1, '\0'); 
+    packet->CopyData(reinterpret_cast<uint8_t*>(buffer.data()), packetSize);
+    std::string request(buffer.data(), packetSize);
+    // ------------------------------------------
 
     if (request.rfind("PLAY", 0) == 0)
     {
@@ -1002,7 +1004,7 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
     double jitterMs = session.jitter * 1000.0; // 从秒转换为毫秒
     session.metricSamples.push_back({
         bandwidthToReportKbps,
-        avgDelay.GetMilliSeconds(),
+        static_cast<double>(avgDelay.GetMilliSeconds()),
         lossRate,
         jitterMs
     });
