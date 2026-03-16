@@ -126,6 +126,9 @@ public:
     // 公共方法，用于从仿真脚本接收“神谕”（总带宽）
     void SetTotalBandwidth(DataRate totalBandwidth);
 
+    // 设置摄像机的固定带宽权重
+    void SetFixedWeight(uint32_t cameraId, double weight);
+
 
 protected:
     virtual void DoDispose(void);
@@ -309,6 +312,9 @@ private:
 
     // 将每个客户端的IP地址映射到其完整的元数据
     std::map<Ipv4Address, ClientInfo> m_clientInfoRegistry;
+
+    // 存储手动指定的摄像机固定权重
+    std::map<uint32_t, double> m_fixedWeights;
 
     // 用于区分哪些摄像头启用高级算法(AI/Minerva)，哪些保持默认GCC。
     // 只有 CameraId <= m_algoCameraIdLimit 的摄像头会启用算法，其他的权重强制为1.0。

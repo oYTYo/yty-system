@@ -470,6 +470,14 @@ void YtyServer::SetTotalBandwidth(DataRate totalBandwidth)
 }
 
 
+// 实现设置固定权重的方法
+void YtyServer::SetFixedWeight(uint32_t cameraId, double weight)
+{
+    m_fixedWeights[cameraId] = weight;
+    NS_LOG_INFO("Set fixed GCC weight " << weight << " for Camera " << cameraId);
+}
+
+
 void YtyServer::StartApplication(void)
 {
     // 在启动时重新检查并初始化ZMQ上下文
@@ -1448,8 +1456,12 @@ void YtyServer::LogPlaybackStats(const Address& clientAddress)
     else
     {
         // --- 纯 GCC 决策流程 ---
-        // 如果 allowAlgo 为 false (即 CameraId > x)，也会进入这里
-        session.aiControlledWeight = 1.0; // 权重为1
+        // 如果字典里有预设的固定权重，则使用预设值，否则默认为1.0
+        if (m_fixedWeights.count(session.clientInfo.cameraId)) {
+            session.aiControlledWeight = m_fixedWeights[session.clientInfo.cameraId];
+        } else {
+            session.aiControlledWeight = 1.0; 
+        }
     }
     
     // --- 4. 日志记录 (保持不变) ---

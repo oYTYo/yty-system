@@ -89,9 +89,12 @@ void ScheduleNextBandwidthChange(NetDeviceContainer aggDevs, NetDeviceContainer 
 
 int main(int argc, char* argv[])
 {
+    // 扩大 UE 摄像机端的 RLC 层全局缓冲区 ===
+    Config::SetDefault("ns3::LteRlcUm::MaxTxBufferSize", UintegerValue(1024 * 1024 * 5));
+
     double simulationTime = 360.0;
     double baseMultiplier = 1.5;
-    uint32_t startLine = 15000;
+    uint32_t startLine = 3660;
 
     bool useAI = false;
     bool useMinerva = false;
@@ -131,6 +134,11 @@ int main(int argc, char* argv[])
 
     NS_LOG_INFO("Configuring LTE Helpers...");
     Ptr<PointToPointEpcHelper> epcHelper = CreateObject<PointToPointEpcHelper>();
+
+    // === 压缩 EPC 核心网内部传输延迟 ===
+    epcHelper->SetAttribute("S1uLinkDelay", TimeValue(MilliSeconds(1)));
+    epcHelper->SetAttribute("S1uLinkDataRate", DataRateValue(DataRate("10Gbps")));
+
     Ptr<LteHelper> lteHelper = CreateObject<LteHelper>();
     lteHelper->SetEpcHelper(epcHelper);
     lteHelper->SetEnbDeviceAttribute("DlBandwidth", UintegerValue(100));
@@ -257,17 +265,23 @@ int main(int argc, char* argv[])
     Ipv4Address serverIp = coreToServerIfaces.GetAddress(1);
     ipv4RoutingHelper.GetStaticRouting(serverNode.Get(0)->GetObject<Ipv4>())->SetDefaultRoute(coreToServerIfaces.GetAddress(0), 1);
 
-    // 用于瓶颈链路的 P2P 助手 (增加缓冲区长度应对拥塞)
+    // 用于有线汇聚链路的 P2P 助手 (瓶颈 B)
     PointToPointHelper p2pBottleneck;
     p2pBottleneck.SetDeviceAttribute("DataRate", StringValue("1Gbps")); // 初始带宽
     p2pBottleneck.SetChannelAttribute("Delay", StringValue("2ms"));
     p2pBottleneck.SetQueue("ns3::DropTailQueue", "MaxSize", StringValue("150p"));
 
-    // 【新增】容器：收集所有需要控制动态带宽的设备
+    // === 新增：独立并放大 PGW 链路的队列 (瓶颈 A) ===
+    PointToPointHelper p2pPgw;
+    p2pPgw.SetDeviceAttribute("DataRate", StringValue("1Gbps"));
+    p2pPgw.SetChannelAttribute("Delay", StringValue("2ms"));
+    p2pPgw.SetQueue("ns3::DropTailQueue", "MaxSize", StringValue("375p")); // 200路摄像机的抗突发队列
+
+    // 容器：收集所有需要控制动态带宽的设备
     NetDeviceContainer allCoreToAggDevs; 
     
-    // Core Router <-> PGW (瓶颈 A)
-    NetDeviceContainer coreToPgwDevs = p2pBottleneck.Install(coreRouterNode.Get(0), pgw);
+    // Core Router <-> PGW (瓶颈 A) —— 注意这里换成了 p2pPgw
+    NetDeviceContainer coreToPgwDevs = p2pPgw.Install(coreRouterNode.Get(0), pgw);
     ipv4h.SetBase("10.254.254.0", "255.255.255.252");
     Ipv4InterfaceContainer coreToPgwIfaces = ipv4h.Assign(coreToPgwDevs);
     
