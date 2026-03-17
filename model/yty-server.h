@@ -304,6 +304,11 @@ private:
     uint32_t m_traceCameraId;       // 要追踪的摄像头ID
     std::ofstream m_traceLogFile;   // 追踪日志的文件流
 
+    // 记录所有摄像机GCC详细参数日志的文件流
+    bool m_enableAllTraceLog;       // 是否开启全局日志（默认true）
+    std::string m_allTraceLogFileName; // 全局日志的文件名
+    std::ofstream m_allTraceLogFile;   // 文件流
+
     // Oracle 模式所需的成员变量
     DataRate m_totalOracleBandwidth;            // 存储“神谕”告知的总带宽
     double m_totalCodecWeight;                  // 所有已连接客户端的总权重

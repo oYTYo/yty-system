@@ -376,6 +376,14 @@ TypeId YtyServer::GetTypeId(void)
         .AddAttribute("VideoComplexity", "Video scene complexity (normal/static/dynamic).", 
                       StringValue("normal"), 
                       MakeStringAccessor(&YtyServer::m_videoComplexity), 
+                      MakeStringChecker())
+        .AddAttribute("EnableAllTraceLog", "Enable logging for all cameras' GCC trace.",
+                      BooleanValue(true),
+                      MakeBooleanAccessor(&YtyServer::m_enableAllTraceLog),
+                      MakeBooleanChecker())
+        .AddAttribute("AllTraceLogFile", "File to log all cameras' GCC trace.",
+                      StringValue("scratch/all_cameras_gcc_trace.txt"),
+                      MakeStringAccessor(&YtyServer::m_allTraceLogFileName),
                       MakeStringChecker());
     return tid;
 }
@@ -628,6 +636,18 @@ void YtyServer::StartApplication(void)
             NS_LOG_ERROR("Failed to open trace log file: " << traceLogFileName);
         }
     }
+
+
+    // 用属性控制全局日志的创建
+    if (m_enableAllTraceLog)
+    {
+        m_allTraceLogFile.open(m_allTraceLogFileName, std::ios::out | std::ios::trunc);
+        if (m_allTraceLogFile.is_open())
+        {
+            m_allTraceLogFile << "Time(s)\tCameraId\tIP_Address\tCodec\tIn_Throughput(kbps)\tIn_Delay(ms)\tIn_LossRate\tWeight\tDynamic_Bandwidth(kbps)\tOut_LossDecision\tOut_DelayDecision\tState\tOut_TargetBitrate(kbps)" << std::endl;
+        }
+    }
+
 }
     
 
@@ -657,6 +677,11 @@ void YtyServer::StopApplication(void)
     if (m_traceLogFile.is_open())
     {
         m_traceLogFile.close();
+    }
+
+    if (m_allTraceLogFile.is_open())
+    {
+        m_allTraceLogFile.close();
     }
 
     if (m_socket)
@@ -1131,6 +1156,25 @@ void YtyServer::SendRtcpFeedback(const Address& clientAddress)
                            << targetBitrateBps / 1000.0 << std::endl;
         }
     }
+
+
+    if (m_enableAllTraceLog && m_allTraceLogFile.is_open())
+    {
+        m_allTraceLogFile << Simulator::Now().GetSeconds() << "\t"
+                          << session.clientInfo.cameraId << "\t"
+                          << InetSocketAddress::ConvertFrom(clientAddress).GetIpv4() << "\t" 
+                          << session.clientInfo.codec << "\t"                                
+                          << bandwidthToReportKbps << "\t"                                   
+                          << avgDelay.GetMilliSeconds() << "\t"                              
+                          << lossRate << "\t"                                                
+                          << weight_to_use << "\t"                                           
+                          << (m_totalOracleBandwidth.GetBitRate() / 1000.0) << "\t"          
+                          << (m_useOracle ? "N/A" : loss_decision) << "\t"                   
+                          << (m_useOracle ? "N/A" : delay_decision) << "\t"                  
+                          << state << "\t"                                                   
+                          << targetBitrateBps / 1000.0 << std::endl;                         
+    }
+
 
     session.aiBandwidth = targetBitrateBps; // 更新用于日志的aiBandwidth字段
     session.logIntervalSumAiBandwidthBps += targetBitrateBps; 
