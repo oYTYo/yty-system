@@ -149,6 +149,8 @@ private:
     // 应用程序最大码率限制 (0 表示不限制)
     DataRate m_maxAppBitrate;
 
+    std::string m_videoComplexity;
+
 };
 
 } // namespace ns3

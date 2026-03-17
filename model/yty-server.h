@@ -319,6 +319,8 @@ private:
     // 用于区分哪些摄像头启用高级算法(AI/Minerva)，哪些保持默认GCC。
     // 只有 CameraId <= m_algoCameraIdLimit 的摄像头会启用算法，其他的权重强制为1.0。
     uint32_t m_algoCameraIdLimit;
+
+    std::string m_videoComplexity; // 视频画面复杂度旋钮
   
     // 不再仅仅是从GCC获取，而是获取最终的目标码率
     uint32_t GetTargetBitrate(ClientSession& session, double throughputKbps, Time delay, double lossRate);

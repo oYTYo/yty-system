@@ -44,7 +44,7 @@ public:
     static TypeId GetTypeId(void);
     YtyCodecSimulator();
     // 构造函数，需要指定使用 H.264 还是 H.265
-    YtyCodecSimulator(std::string codecType);
+    YtyCodecSimulator(std::string codecType, std::string complexity = "normal");
     virtual ~YtyCodecSimulator();
 
     /**
@@ -73,6 +73,7 @@ private:
     };
     
     std::string m_codecType;
+    std::string m_complexity;
     std::vector<CodecDataEntry> m_codecDb; // 存储编码参数的数据库
     std::vector<std::pair<int, int>> m_resolutions; // 支持的分辨率列表 (降序)
 

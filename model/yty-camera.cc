@@ -66,7 +66,8 @@ TypeId YtyCamera::GetTypeId(void)
         .AddAttribute("RemotePort", "The destination port of the outbound packets", UintegerValue(9), MakeUintegerAccessor(&YtyCamera::m_peerPort), MakeUintegerChecker<uint16_t>())
         .AddAttribute("CameraId", "此摄像头的唯一ID.", UintegerValue(0), MakeUintegerAccessor(&YtyCamera::m_cameraId), MakeUintegerChecker<uint32_t>())
         .AddAttribute("Codec", "The video codec (e.g., H.264, H.265).", StringValue("H.264"), MakeStringAccessor(&YtyCamera::m_codec), MakeStringChecker())
-        .AddAttribute("MaxAppBitrate", "The maximum bitrate the application is allowed to generate.", DataRateValue(DataRate("0bps")), MakeDataRateAccessor(&YtyCamera::m_maxAppBitrate), MakeDataRateChecker());
+        .AddAttribute("MaxAppBitrate", "The maximum bitrate the application is allowed to generate.", DataRateValue(DataRate("0bps")), MakeDataRateAccessor(&YtyCamera::m_maxAppBitrate), MakeDataRateChecker())
+        .AddAttribute("VideoComplexity", "Video scene complexity (normal/static/dynamic).", StringValue("normal"), MakeStringAccessor(&YtyCamera::m_videoComplexity), MakeStringChecker());
     return tid;
 }
 
@@ -90,12 +91,12 @@ YtyCamera::YtyCamera()
       m_pressureThreshold(100), // 设定一个阈值，例如100
       m_pressureRecoveryRate(10), // 设定一个恢复速率，例如每次降低10
       m_initialParamsNegotiated(false),
-      m_maxAppBitrate(0)
+      m_maxAppBitrate(0),
+      m_videoComplexity("normal")
 
 {
     NS_LOG_FUNCTION(this);
     // 在构造函数中创建 CodecSimulator 实例
-    // m_codecSimulator = std::make_unique<YtyCodecSimulator>(m_codec);
 }
 
 YtyCamera::~YtyCamera()
@@ -123,7 +124,7 @@ void YtyCamera::StartApplication(void)
     NS_LOG_FUNCTION(this);
 
     // 在启动应用时，根据Codec类型完成最终的初始化
-    m_codecSimulator = std::make_unique<YtyCodecSimulator>(m_codec);
+    m_codecSimulator = std::make_unique<YtyCodecSimulator>(m_codec, m_videoComplexity);
 
     m_resolution = "N/A";
     m_frameRate = 30; // 保留一个默认帧率用于计算
